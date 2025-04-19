@@ -1,16 +1,17 @@
+from flask import Flask, request, jsonify
 import pandas as pd
 import random
 import os
 from langchain.memory import ConversationBufferMemory
-from langchain_core.runnables import RunnablePassthrough
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage
 from langchain_mistralai.chat_models import ChatMistralAI
-from langchain_community.document_loaders import PyPDFLoader
 from dotenv import load_dotenv
 import PyPDF2
+from langchain.schema import HumanMessage, AIMessage  # Import these classes
 
 load_dotenv()
+
+app = Flask(__name__)
 
 # Function to extract text from PDF CV
 def extract_cv_text(pdf_path):
@@ -61,13 +62,28 @@ technical_prompt = ChatPromptTemplate.from_messages([
     ("human", "{input}")
 ])
 
-def run_interview():
-    # Load CV
-    cv_path = os.path.join(os.path.expanduser("~"), "Desktop", "candidate_cv.pdf")
-    cv_text = extract_cv_text(cv_path)
-    print(f"CV Text: {cv_text}\n")
+def serialize_messages(messages):
+    serialized = []
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            serialized.append({"role": "user", "content": message.content})
+        elif isinstance(message, AIMessage):
+            serialized.append({"role": "ai", "content": message.content})
+        else:
+            serialized.append({"role": "unknown", "content": str(message)})
+    return serialized
+
+# Global memory to store conversation history
+conversation_memory = ConversationBufferMemory(return_messages=True)
+
+# Flask routes
+@app.route('/start_interview', methods=['GET'])
+def start_interview():
+    cv_path = os.path.join("Interview Files", "candidate_cv.pdf")  # Adjusted to the Interview Files directory
+    csv_path = os.path.join("Interview Files", "Software Questions.csv")  # Adjusted to the Interview Files directory
     
-    tech_questions = load_technical_questions("C:\\Users\\Ezzwa\\Desktop\\New folder (3)\\Software Questions.csv")
+    cv_text = extract_cv_text(cv_path)
+    tech_questions = load_technical_questions(csv_path)
     behavioral_questions = [
         "Tell me about a time you faced a difficult challenge at work and how you handled it",
         "Describe a situation where you had to work with a difficult team member",
@@ -76,99 +92,63 @@ def run_interview():
     
     memory = ConversationBufferMemory(return_messages=True)
     
-    print("Starting interview...\n")
-
-    # 1. Greeting Phase
-    print("(Greeting Phase)")
+    # Greeting Phase
     greeting_chain = get_greeting_prompt(cv_text) | greeting_llm
     response = greeting_chain.invoke({
         "input": "Greet the candidate warmly.",
         "history": []
     })
-    print(f"Interviewer: {response.content}")
     memory.chat_memory.add_user_message("Greet the candidate warmly")
     memory.chat_memory.add_ai_message(response.content)
     
-    # 2. Small Talk (3 exchanges)
-    for _ in range(3):
-        user_input = input("Candidate: ")
-        memory.chat_memory.add_user_message(user_input)
-        
-        history = memory.chat_memory.messages
-        response = greeting_chain.invoke({
-            "input": user_input,
-            "history": history
-        })
-        print(f"\nInterviewer: {response.content}")
-        memory.chat_memory.add_ai_message(response.content)
-
-    # 3. Behavioral Questions
-    print("\n(Behavioral Questions Phase)")
-    behavioral_chain = behavioral_prompt | behavioral_llm
-    selected_behavioral = random.sample(behavioral_questions, min(3, len(behavioral_questions)))
+    # Log the AI's response to the console
+    print(f"Interviewer: {response.content}")
     
-    for question in selected_behavioral:
-        history = memory.chat_memory.messages
+    return jsonify({
+        "phase": "greeting",
+        "response": response.content,
+        "history": serialize_messages(memory.chat_memory.messages)
+    })
+
+@app.route('/ask_question', methods=['POST'])
+def ask_question():
+    data = request.json
+    user_input = data.get('user_input', "")  # Only the user's response is required
+    
+    # Log the user's input to the console
+    print(f"User: {user_input}")
+    
+    # Default to behavioral phase
+    phase = "behavioral"
+    
+    if phase == "behavioral":
+        # Behavioral logic
+        behavioral_chain = behavioral_prompt | behavioral_llm
         response = behavioral_chain.invoke({
-            "input": f"""Comment briefly on the last thing they said and then ask: {question}
-            Don't mention the interview process or thank them.""",
-            "history": history
+            "input": user_input,  # Pass only the latest user input
+            "history": conversation_memory.chat_memory.messages  # Use history as context
         })
-        print(f"\nInterviewer: {response.content}")
-        memory.chat_memory.add_ai_message(response.content)
-        
-        candidate_answer = input("Candidate: ")
-        memory.chat_memory.add_user_message(candidate_answer)
-        
-        # Follow-up
-        history = memory.chat_memory.messages
-        follow_up = behavioral_chain.invoke({
-            "input": f"Generate one relevant follow-up based on: {candidate_answer}",
-            "history": history
-        })
-        print(f"\nInterviewer: {follow_up.content}")
-        memory.chat_memory.add_ai_message(follow_up.content)
-        
-        candidate_followup = input("Candidate: ")
-        memory.chat_memory.add_user_message(candidate_followup)
-
-    # 4. Technical Questions
-    print("\n(Technical Questions Phase)\n")
-    technical_chain = technical_prompt | technical_llm
-    selected_technical = random.sample(tech_questions, 3)
-    
-    for question_data in selected_technical:
-        question = question_data['Question']
-        model_answer = question_data['Answer']
-        
-        history = memory.chat_memory.messages
+    elif phase == "technical":
+        # Technical logic (if needed in the future)
+        technical_chain = technical_prompt | technical_llm
         response = technical_chain.invoke({
-            "input": f"Ask this technical question: {question}",
-            "history": history
+            "input": user_input,  # Pass only the latest user input
+            "history": conversation_memory.chat_memory.messages  # Use history as context
         })
-        print(f"\nInterviewer: {response.content}")
-        memory.chat_memory.add_ai_message(response.content)
-        
-        candidate_answer = input("Candidate: ")
-        memory.chat_memory.add_user_message(candidate_answer)
-        
-        evaluation = technical_chain.invoke({
-            "input": f"""Evaluate this answer for '{question}':
-            Expected: {model_answer}
-            Candidate: {candidate_answer}
-            Provide specific feedback and score from 1-10""",
-            "history": history
-        })
-        print(f"\nEvaluation: {evaluation.content}")
-        memory.chat_memory.add_ai_message(evaluation.content)
-
-    # Closing
-    print("\nInterviewer: Thank you for your time today. We'll be in touch soon!")
+    else:
+        return jsonify({"error": "Invalid phase"}), 400
     
-    # Show full history
-    print("\n--- Complete Transcript ---")
-    for msg in memory.chat_memory.messages:
-        print(f"{msg.type}: {msg.content}")
+    # Update the conversation memory
+    conversation_memory.chat_memory.add_user_message(user_input)
+    conversation_memory.chat_memory.add_ai_message(response.content)
+    
+    # Log the AI's response to the console
+    print(f"AI: {response.content}")
+    
+    return jsonify({
+        "response": response.content,
+        "history": serialize_messages(conversation_memory.chat_memory.messages)
+    })
 
 if __name__ == "__main__":
-    run_interview()
+    app.run(debug=True)
