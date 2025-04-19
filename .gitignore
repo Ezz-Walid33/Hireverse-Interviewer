@@ -1,3 +1,4 @@
 .env
 /.venv
 /Interview Files
+flask_logs.txt

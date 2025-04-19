@@ -8,10 +8,23 @@ from langchain_mistralai.chat_models import ChatMistralAI
 from dotenv import load_dotenv
 import PyPDF2
 from langchain.schema import HumanMessage, AIMessage  # Import these classes
+import logging
 
 load_dotenv()
 
 app = Flask(__name__)
+
+# Redirect Flask logs and custom logs to the same file
+log = logging.getLogger('werkzeug')
+file_handler = logging.FileHandler('flask_logs.txt')
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+log.addHandler(file_handler)
+
+# Set up a custom logger for candidate and interviewer messages
+app_logger = logging.getLogger('app_logger')
+app_logger.setLevel(logging.INFO)
+app_logger.addHandler(file_handler)
 
 # Function to extract text from PDF CV
 def extract_cv_text(pdf_path):
@@ -101,8 +114,9 @@ def start_interview():
     memory.chat_memory.add_user_message("Greet the candidate warmly")
     memory.chat_memory.add_ai_message(response.content)
     
-    # Log the AI's response to the console
+    # Log the AI's response to the console and to the log file
     print(f"Interviewer: {response.content}")
+    app_logger.info(f"Interviewer: {response.content}")
     
     return jsonify({
         "phase": "greeting",
@@ -115,8 +129,9 @@ def ask_question():
     data = request.json
     user_input = data.get('user_input', "")  # Only the user's response is required
     
-    # Log the user's input to the console
-    print(f"User: {user_input}")
+    # Log the candidate's input to the console and to the log file
+    print(f"Candidate: {user_input}")
+    app_logger.info(f"Candidate: {user_input}")
     
     # Default to behavioral phase
     phase = "behavioral"
@@ -142,8 +157,9 @@ def ask_question():
     conversation_memory.chat_memory.add_user_message(user_input)
     conversation_memory.chat_memory.add_ai_message(response.content)
     
-    # Log the AI's response to the console
-    print(f"AI: {response.content}")
+    # Log the AI's response to the console and to the log file
+    print(f"Interviewer: {response.content}")
+    app_logger.info(f"Interviewer: {response.content}")
     
     return jsonify({
         "response": response.content,
