@@ -120,8 +120,7 @@ def start_interview():
     
     return jsonify({
         "phase": "greeting",
-        "response": response.content,
-        "history": serialize_messages(memory.chat_memory.messages)
+        "response": response.content
     })
 
 @app.route('/ask_question', methods=['POST'])
@@ -162,8 +161,7 @@ def ask_question():
     app_logger.info(f"Interviewer: {response.content}")
     
     return jsonify({
-        "response": response.content,
-        "history": serialize_messages(conversation_memory.chat_memory.messages)
+        "response": response.content
     })
 
 if __name__ == "__main__":
