@@ -45,9 +45,9 @@ def load_technical_questions(csv_path):
     return df[['Question', 'Answer']].to_dict('records')
 
 # Initialize LLMs
-greeting_llm = ChatMistralAI(model="mistral-large-latest", temperature=0.7)
-behavioral_llm = ChatMistralAI(model="mistral-large-latest", temperature=0.6)
-technical_llm = ChatMistralAI(model="mistral-large-latest", temperature=0.5)
+greeting_llm = ChatMistralAI(model_name="mistral-large-latest", temperature=0.7)
+behavioral_llm = ChatMistralAI(model_name="mistral-large-latest", temperature=0.6)
+technical_llm = ChatMistralAI(model_name="mistral-large-latest", temperature=0.5)
 
 # Create prompt templates
 def get_greeting_prompt(cv_text):
@@ -112,7 +112,7 @@ def start_interview():
         "history": []
     })
     memory.chat_memory.add_user_message("Greet the candidate warmly")
-    memory.chat_memory.add_ai_message(response.content)
+    memory.chat_memory.add_ai_message(str(response.content))
     
     # Log the AI's response to the console and to the log file
     print(f"Interviewer: {response.content}")
@@ -126,7 +126,7 @@ def start_interview():
 
 @app.route('/ask_question', methods=['POST'])
 def ask_question():
-    data = request.json
+    data = request.json or {}
     user_input = data.get('user_input', "")  # Only the user's response is required
     
     # Log the candidate's input to the console and to the log file
@@ -155,7 +155,7 @@ def ask_question():
     
     # Update the conversation memory
     conversation_memory.chat_memory.add_user_message(user_input)
-    conversation_memory.chat_memory.add_ai_message(response.content)
+    conversation_memory.chat_memory.add_ai_message(str(response.content))
     
     # Log the AI's response to the console and to the log file
     print(f"Interviewer: {response.content}")
