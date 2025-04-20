@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 # Redirect Flask logs and custom logs to the same file
 log = logging.getLogger('werkzeug')
-file_handler = logging.FileHandler('flask_logs.txt')
+file_handler = logging.FileHandler('flask_logs.log')
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(formatter)
 log.addHandler(file_handler)
