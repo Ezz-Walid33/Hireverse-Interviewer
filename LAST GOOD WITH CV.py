@@ -59,7 +59,6 @@ def get_greeting_prompt(cv_text):
         MessagesPlaceholder(variable_name="history"),
         ("human", "{input}")
     ])
-
 behavioral_prompt = ChatPromptTemplate.from_messages([
     ("system", """You are conducting a behavioral interview. Ask questions that reveal 
     the candidate's soft skills, problem-solving approach, and cultural fit.
@@ -74,6 +73,24 @@ technical_prompt = ChatPromptTemplate.from_messages([
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}")
 ])
+
+
+# Extract CV text and load questions    
+cv_path = os.path.join("Interview Files", "candidate_cv.pdf")  # Adjusted to the Interview Files directory
+csv_path = os.path.join("Interview Files", "Software Questions.csv")  # Adjusted to the Interview Files directory
+cv_text = extract_cv_text(cv_path)
+
+greeting_chain = get_greeting_prompt(cv_text) | greeting_llm
+behavioral_chain = behavioral_prompt | behavioral_llm
+technical_chain = technical_prompt | technical_llm
+
+# Load technical and behavioral questions
+tech_questions = load_technical_questions(csv_path)
+behavioral_questions = [
+        "Tell me about a time you faced a difficult challenge at work and how you handled it",
+        "Describe a situation where you had to work with a difficult team member",
+        "Give an example of when you took initiative to improve a process"
+    ]
 
 def serialize_messages(messages):
     serialized = []
@@ -92,27 +109,13 @@ conversation_memory = ConversationBufferMemory(return_messages=True)
 # Flask routes
 @app.route('/start_interview', methods=['GET'])
 def start_interview():
-    cv_path = os.path.join("Interview Files", "candidate_cv.pdf")  # Adjusted to the Interview Files directory
-    csv_path = os.path.join("Interview Files", "Software Questions.csv")  # Adjusted to the Interview Files directory
     
-    cv_text = extract_cv_text(cv_path)
-    tech_questions = load_technical_questions(csv_path)
-    behavioral_questions = [
-        "Tell me about a time you faced a difficult challenge at work and how you handled it",
-        "Describe a situation where you had to work with a difficult team member",
-        "Give an example of when you took initiative to improve a process"
-    ]
-    
-    memory = ConversationBufferMemory(return_messages=True)
-    
-    # Greeting Phase
-    greeting_chain = get_greeting_prompt(cv_text) | greeting_llm
     response = greeting_chain.invoke({
         "input": "Greet the candidate warmly.",
         "history": []
     })
-    memory.chat_memory.add_user_message("Greet the candidate warmly")
-    memory.chat_memory.add_ai_message(str(response.content))
+    conversation_memory.chat_memory.add_user_message("Greet the candidate warmly")
+    conversation_memory.chat_memory.add_ai_message(str(response.content))
     
     # Log the AI's response to the console and to the log file
     print(f"Interviewer: {response.content}")
@@ -137,14 +140,12 @@ def ask_question():
     
     if phase == "behavioral":
         # Behavioral logic
-        behavioral_chain = behavioral_prompt | behavioral_llm
         response = behavioral_chain.invoke({
             "input": user_input,  # Pass only the latest user input
             "history": conversation_memory.chat_memory.messages  # Use history as context
         })
     elif phase == "technical":
         # Technical logic (if needed in the future)
-        technical_chain = technical_prompt | technical_llm
         response = technical_chain.invoke({
             "input": user_input,  # Pass only the latest user input
             "history": conversation_memory.chat_memory.messages  # Use history as context
