@@ -127,43 +127,84 @@ def start_interview():
     })
 
 @app.route('/ask_question', methods=['POST'])
-def ask_question():
-    data = request.json or {}
-    user_input = data.get('user_input', "")  # Only the user's response is required
-    
-    # Log the candidate's input to the console and to the log file
-    print(f"Candidate: {user_input}")
-    app_logger.info(f"Candidate: {user_input}")
-    
-    # Default to behavioral phase
-    phase = "behavioral"
-    
-    if phase == "behavioral":
-        # Behavioral logic
-        response = behavioral_chain.invoke({
-            "input": user_input,  # Pass only the latest user input
-            "history": conversation_memory.chat_memory.messages  # Use history as context
-        })
-    elif phase == "technical":
-        # Technical logic (if needed in the future)
-        response = technical_chain.invoke({
-            "input": user_input,  # Pass only the latest user input
-            "history": conversation_memory.chat_memory.messages  # Use history as context
-        })
-    else:
-        return jsonify({"error": "Invalid phase"}), 400
-    
-    # Update the conversation memory
-    conversation_memory.chat_memory.add_user_message(user_input)
-    conversation_memory.chat_memory.add_ai_message(str(response.content))
-    
-    # Log the AI's response to the console and to the log file
-    print(f"Interviewer: {response.content}")
-    app_logger.info(f"Interviewer: {response.content}")
-    
-    return jsonify({
+def small_talk():
+   user_input = input("Candidate: ")
+   conversation_memory.chat_memory.add_user_message(user_input)
+        
+   history = conversation_memory.chat_memory.messages
+   response = greeting_chain.invoke({
+    "input": user_input,
+    "history": history
+  })
+   print(f"\nInterviewer: {response.content}")
+   conversation_memory.chat_memory.add_ai_message(response.content) 
+   return jsonify({
         "response": response.content
     })
+
+
+@app.route('/ask_question', methods=['POST'])
+def ask_behavioural():
+    selected_behavioral = random.sample(behavioral_questions, min(3, len(behavioral_questions)))
+    
+    for question in selected_behavioral:
+        history = conversation_memory.chat_memory.messages
+        response = behavioral_chain.invoke({
+            "input": f"""Comment briefly on the last thing they said and then ask: {question}
+            Don't mention the interview process or thank them.""",
+            "history": history
+        })
+        print(f"\nInterviewer: {response.content}")
+        conversation_memory.chat_memory.add_ai_message(response.content)
+        
+        candidate_answer = input("Candidate: ")
+        conversation_memory.chat_memory.add_user_message(candidate_answer)
+        
+        # Follow-up
+        history = conversation_memory.chat_memory.messages
+        follow_up = behavioral_chain.invoke({
+            "input": f"Generate one relevant follow-up based on: {candidate_answer}",
+            "history": history
+        })
+        print(f"\nInterviewer: {follow_up.content}")
+        conversation_memory.chat_memory.add_ai_message(follow_up.content)
+        
+        candidate_followup = input("Candidate: ")
+        conversation_memory.chat_memory.add_user_message(candidate_followup)
+
+
+@app.route('/ask_question', methods=['POST'])
+def ask_technical():
+    selected_technical = random.sample(tech_questions, 3)
+    
+    for question_data in selected_technical:
+        question = question_data['Question']
+        model_answer = question_data['Answer']
+        
+        history = conversation_memory.chat_memory.messages
+        response = technical_chain.invoke({
+            "input": f"Ask this technical question: {question}",
+            "history": history
+        })
+        print(f"\nInterviewer: {response.content}")
+        conversation_memory.chat_memory.add_ai_message(response.content)
+        
+        candidate_answer = input("Candidate: ")
+        conversation_memory.chat_memory.add_user_message(candidate_answer)
+        
+        evaluation = technical_chain.invoke({
+            "input": f"""Evaluate this answer for '{question}':
+            Expected: {model_answer}
+            Candidate: {candidate_answer}
+            Provide specific feedback and score from 1-10""",
+            "history": history
+        })
+        print(f"\nEvaluation: {evaluation.content}")
+    
+        return jsonify({
+            "response": response.content,
+            "evaluation": evaluation.content
+        })
 
 if __name__ == "__main__":
     app.run(debug=True)
