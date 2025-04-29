@@ -1,7 +1,9 @@
 flask
+flask-socketio
 pandas
 python-dotenv
 PyPDF2
 langchain
 langchain-core
 langchain-mistralai
+termcolor

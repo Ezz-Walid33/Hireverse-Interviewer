@@ -8,11 +8,16 @@ from langchain_mistralai.chat_models import ChatMistralAI
 from dotenv import load_dotenv
 import PyPDF2
 from langchain.schema import HumanMessage, AIMessage  # Import these classes
+from flask_socketio import SocketIO
 import logging
+import threading
+from queue import Queue
+from termcolor import colored
 
 load_dotenv()
 
-app = Flask(__name__)
+#app = Flask(__name__)
+socketio = SocketIO()
 
 # Redirect Flask logs and custom logs to the same file
 log = logging.getLogger('werkzeug')
@@ -106,10 +111,40 @@ def serialize_messages(messages):
 # Global memory to store conversation history
 conversation_memory = ConversationBufferMemory(return_messages=True)
 
-# Flask routes
-@app.route('/start_interview', methods=['GET'])
-def start_interview():
-    
+class InterviewUser:
+    def __init__(self, socket_id, name):
+        self.socket_id = socket_id
+        self.name = name
+        self.phase = "greeting"
+        self.question_count=0
+
+    def __repr__(self):
+        return f"InterviewUser(socket_id={self.socket_id})"
+
+
+def create_app():
+    app = Flask(__name__)
+    socketio.init_app(app)
+    return app
+users = []
+def get_user_by_socket_id(socket_id):
+    for user in users:
+        if user.socket_id == socket_id:
+            return user
+    return None
+
+@socketio.on('connect')
+def handle_connect():
+    print("Node.js socket connected")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('A client disconnected!')
+
+@socketio.on('start_interview')
+def handle_start_interview(data):
+    print(colored("-----------START INTERVIEW-----------",'cyan'))
+    users.append(InterviewUser(data['socketId'], data['name']))
     response = greeting_chain.invoke({
         "input": "Greet the candidate warmly.",
         "history": []
@@ -118,17 +153,32 @@ def start_interview():
     conversation_memory.chat_memory.add_ai_message(str(response.content))
     
     # Log the AI's response to the console and to the log file
-    print(f"Interviewer: {response.content}")
+    print(f"{colored("Interviewer:","cyan")} {response.content}")
     app_logger.info(f"Interviewer: {response.content}")
     
-    return jsonify({
-        "phase": "greeting",
-        "response": response.content
-    })
+    socketio.emit('ai_response',{ "phase": "greeting", "response": response.content, "recipient": data['socketId']})
 
-@app.route('/ask_question', methods=['POST'])
-def small_talk():
-   user_input = input("Candidate: ")
+def wait_for_candidate_response(socket_id):
+    """Waits for a candidate's response from the socket."""
+    response_queue = Queue()
+
+    def on_response(data):
+        if data['socketId'] == socket_id:
+            response_queue.put(data['message'])
+
+    # Set up a temporary event listener
+    socketio.on('candidate_response', on_response)
+
+    # Block until a response is received
+    response = response_queue.get()
+
+    # Remove the temporary listener
+    socketio.off('candidate_response', on_response)
+
+    return response
+    
+def small_talk(user,user_input):
+   print(colored("SMALL TALK!!!!!",'cyan'))
    conversation_memory.chat_memory.add_user_message(user_input)
         
    history = conversation_memory.chat_memory.messages
@@ -136,62 +186,92 @@ def small_talk():
     "input": user_input,
     "history": history
   })
-   print(f"\nInterviewer: {response.content}")
+   print(f"{colored("Interviewer:","cyan")} {response.content}")
    conversation_memory.chat_memory.add_ai_message(response.content) 
-   return jsonify({
-        "response": response.content
-    })
+   socketio.emit('ai_response', { "phase": user.phase, "response": response.content, "recipient": user.socket_id})
 
-
-@app.route('/ask_question', methods=['POST'])
-def ask_behavioural():
-    selected_behavioral = random.sample(behavioral_questions, min(3, len(behavioral_questions)))
+def ask_behavioural(user, user_input):
+    # Use user_input to influence the first question or response
+    history = conversation_memory.chat_memory.messages
     
+    # Generate the initial response based on user_input
+
+    # Proceed with the selected behavioral questions
+    selected_behavioral = random.sample(behavioral_questions, min(3, len(behavioral_questions)))
+
     for question in selected_behavioral:
         history = conversation_memory.chat_memory.messages
+        
+        # Generate and send each behavioral question
         response = behavioral_chain.invoke({
             "input": f"""Comment briefly on the last thing they said and then ask: {question}
             Don't mention the interview process or thank them.""",
             "history": history
         })
-        print(f"\nInterviewer: {response.content}")
+        print(f"{colored("Interviewer:","cyan")} {response.content}")
+
         conversation_memory.chat_memory.add_ai_message(response.content)
-        
-        candidate_answer = input("Candidate: ")
+        socketio.emit('ai_response', { 
+            "phase": user.phase, 
+            "response": response.content, 
+            "recipient": user.socket_id 
+        })
+
+        # Wait for the candidate's answer via socket
+        candidate_answer = wait_for_candidate_response(user.socket_id)
         conversation_memory.chat_memory.add_user_message(candidate_answer)
-        
-        # Follow-up
+
+        # Generate a follow-up based on the candidate's answer
         history = conversation_memory.chat_memory.messages
         follow_up = behavioral_chain.invoke({
             "input": f"Generate one relevant follow-up based on: {candidate_answer}",
             "history": history
         })
-        print(f"\nInterviewer: {follow_up.content}")
+
+        # Send the follow-up to the candidate
         conversation_memory.chat_memory.add_ai_message(follow_up.content)
-        
-        candidate_followup = input("Candidate: ")
+        socketio.emit('ai_response', { 
+            "phase": user.phase, 
+            "response": follow_up.content, 
+            "recipient": user.socket_id 
+        })
+
+        # Wait for the candidate's follow-up answer via socket
+        candidate_followup = wait_for_candidate_response(user.socket_id)
         conversation_memory.chat_memory.add_user_message(candidate_followup)
 
 
-@app.route('/ask_question', methods=['POST'])
-def ask_technical():
+def ask_technical(user, user_input):
     selected_technical = random.sample(tech_questions, 3)
-    
-    for question_data in selected_technical:
+
+    # Use user_input to influence the first question or response
+    history = conversation_memory.chat_memory.messages
+
+    # Proceed with remaining technical questions
+    for question_data in selected_technical[1:]:
         question = question_data['Question']
         model_answer = question_data['Answer']
-        
-        history = conversation_memory.chat_memory.messages
+
+        # Generate the technical question
         response = technical_chain.invoke({
             "input": f"Ask this technical question: {question}",
             "history": history
         })
-        print(f"\nInterviewer: {response.content}")
+        print(f"{colored("Interviewer:","cyan")} {response.content}")
+
+        # Send the question to the candidate
         conversation_memory.chat_memory.add_ai_message(response.content)
-        
-        candidate_answer = input("Candidate: ")
+        socketio.emit('ai_response', {
+            "phase": user.phase,
+            "response": response.content,
+            "recipient": user.socket_id
+        })
+
+        # Wait for candidate's answer
+        candidate_answer = wait_for_candidate_response(user.socket_id)
         conversation_memory.chat_memory.add_user_message(candidate_answer)
-        
+
+        # Evaluate the candidate's answer
         evaluation = technical_chain.invoke({
             "input": f"""Evaluate this answer for '{question}':
             Expected: {model_answer}
@@ -199,12 +279,72 @@ def ask_technical():
             Provide specific feedback and score from 1-10""",
             "history": history
         })
-        print(f"\nEvaluation: {evaluation.content}")
-    
-        return jsonify({
-            "response": response.content,
-            "evaluation": evaluation.content
+
+        # Send the evaluation to the candidate
+        socketio.emit('evaluation', {
+            "phase": user.phase,
+            "response": evaluation.content,
+            "recipient": user.socket_id
         })
 
+def phase_transition(user,user_input):
+    history = conversation_memory.chat_memory.messages
+    prompt ={
+            "input": f"The last point in your {user.phase} phase of the interview, the user said: \"{user_input}\", Comment on it briefly and do not ask any questions.",
+            "history": history
+        }
+    match user.phase:
+        case "greeting":
+            response = greeting_chain.invoke(prompt)
+        case "behavioural":
+            response = behavioral_chain.invoke(prompt)
+        case "technical":
+            response = technical_chain.invoke(prompt)
+
+    print(f"{colored("Interviewer:","cyan")} {response.content}")
+    conversation_memory.chat_memory.add_ai_message(response.content) 
+    socketio.emit('ai_response', { "phase": user.phase, "response": response.content, "recipient": user.socket_id})
+    
+    match user.phase:
+        case "greeting":
+            user.phase = "behavioural"
+            print(colored("-----------BEHAVIOURAL PHASE-----------",'cyan'))
+            ask_behavioural(user, user_input)
+        case "behavioural":
+            user.phase = "technical"
+            print(colored("-----------TECHNICAL PHASE-----------",'cyan'))
+            ask_technical(user, user_input)
+        case "technical":
+            user.phase = "end"
+
+
+
+
+@socketio.on('message')
+def handle_message(data):
+    user = get_user_by_socket_id(data['socketId'])
+    print(colored(f"{user.name}: ","yellow") + data['message'])
+    app_logger.info(f"{user.name}: {data['message']}")
+    user.question_count += 1
+    if user.phase == "greeting":
+        
+        if user.question_count < 3:
+            small_talk(user, data['message'])
+        else:
+            phase_transition(user,data['message'])
+            
+    elif user.phase == "behavioural":
+        if user.question_count < 6:
+            ask_behavioural(user, data['message'])
+        else:
+            phase_transition(user,data['message'])
+
+    elif user.phase == "technical":
+        
+        if user.question_count < 9:
+            ask_technical(user, data['message'])
+        else:
+            phase_transition(user,data['message'])
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    socketio.run(create_app())
