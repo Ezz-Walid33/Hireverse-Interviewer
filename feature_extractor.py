@@ -1,0 +1,153 @@
+import sys
+import os
+import tempfile
+import subprocess
+import shutil
+import wave
+
+# Set the base directory to Hireverse-Interviewer
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+
+from hireverse.utils.face_analyzer import FaceAnalyzer
+from hireverse.schemas.frame import Frame
+from hireverse.utils.feature_storage import FeatureStorage
+from hireverse.schemas.model_features import ProsodicFeatures
+from hireverse.utils.prosody_analyzer import ProsodyAnalyzer
+import numpy as np
+
+def extract_audio_from_video(video_path, output_wav_path):
+    """Extracts audio from a video file using ffmpeg."""
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i", video_path,
+        "-vn",
+        "-acodec", "pcm_s16le",
+        "-ar", "16000",
+        "-ac", "1",
+        output_wav_path
+    ]
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        print("ffmpeg error:", result.stderr.decode())
+
+def is_valid_wav(filepath):
+    try:
+        with wave.open(filepath, 'rb') as wav_file:
+            return wav_file.getnframes() > 0
+    except Exception:
+        return False
+
+def extract_features_from_video(participant_id, video_path, output_csv_path=None):
+    print(f"[INFO] Starting feature extraction for participant: {participant_id}")
+    print(f"[INFO] Video path: {video_path}")
+
+    # All outputs in Hireverse-Interviewer/data/processed
+    if output_csv_path is None:
+        output_csv_path = os.path.join(BASE_DIR, "data", "processed", "interview_features.csv")
+    print(f"[INFO] Output CSV path: {output_csv_path}")
+
+    face_analyzer = FaceAnalyzer()
+    print("[INFO] Extracting video frames...")
+    frames = face_analyzer.get_video_frames(
+        video_path, participant_id, num_selected_frames=140
+    )
+    print(f"[INFO] Number of frames extracted: {len(frames)}")
+
+    # Process facial landmarks
+    filtered_frames = []
+    print("[INFO] Processing facial landmarks...")
+    for frame in frames:
+        frame.facial_landmarks_obj = face_analyzer.process_image_results(frame.image)
+        if frame.facial_landmarks_obj:
+            frame.facial_landmarks = frame.facial_landmarks_obj.landmark
+            filtered_frames.append(frame)
+    frames = filtered_frames
+    print(f"[INFO] Frames with valid facial landmarks: {len(frames)}")
+
+    # Face coordinates
+    print("[INFO] Extracting face coordinates...")
+    for frame in frames:
+        if frame.facial_landmarks:
+            frame.face = face_analyzer.get_face_coordinates(frame.facial_landmarks, frame.image)
+
+    # Head displacement
+    print("[INFO] Calculating head displacement...")
+    for i in range(len(frames) - 1):
+        bbox1 = face_analyzer.get_bouding_box_center(frames[i].face)
+        bbox2 = face_analyzer.get_bouding_box_center(frames[i + 1].face)
+        frames[i].head_displacement = face_analyzer.get_displacement_between_two_bounding_boxes(bbox1, bbox2)
+        frames[i].head_vertical_displacement = face_analyzer.get_vertical_displacement_between_two_bounding_boxes(bbox1, bbox2)
+        frames[i].head_horizontal_displacement = face_analyzer.get_horizontal_distance_between_two_bounding_boxes(bbox1, bbox2)
+
+    # Smile (happiness)
+    print("[INFO] Calculating smile probabilities...")
+    SMOOTH_WINDOW = 5
+    happiness_buffer = []
+    def smooth_happiness(happiness_prob):
+        if happiness_prob is None:
+            return 0
+        happiness_buffer.append(happiness_prob)
+        if len(happiness_buffer) > SMOOTH_WINDOW:
+            happiness_buffer.pop(0)
+        return np.mean(happiness_buffer)
+
+    for i, frame in enumerate(frames):
+        face_roi = face_analyzer.get_face_roi_image(frame.image, frame.face, expand_ratio=1.1)
+        frame.smile = smooth_happiness(face_analyzer.get_smile_from_frame(face_roi))
+
+    # Selected facial features
+    print("[INFO] Extracting selected facial features...")
+    for frame in frames:
+        frame.two_landmarks_connectors = face_analyzer.get_selected_facial_landmarks(frame.facial_landmarks)
+
+    # Head pose
+    print("[INFO] Calculating head pose angles...")
+    for frame in frames:
+        result = face_analyzer.get_face_angles(frame.image, frame.facial_landmarks)
+        frame.face_angles = result
+
+    # --- Extract audio from video and analyze prosody ---
+    audio_dir = os.path.join(BASE_DIR, "data", "raw", "audio")
+    os.makedirs(audio_dir, exist_ok=True)
+    final_audio_path = os.path.join(audio_dir, f"trimmed_{participant_id}.wav")
+
+    print(f"[INFO] Extracting audio from video to: {final_audio_path}")
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir=audio_dir) as temp_audio:
+        temp_audio_path = temp_audio.name
+    try:
+        extract_audio_from_video(video_path, temp_audio_path)
+        print(f"[INFO] Audio extracted to temp file: {temp_audio_path}")
+        shutil.move(temp_audio_path, final_audio_path)
+        print(f"[INFO] Audio moved to final path: {final_audio_path}")
+        # Check if audio is valid
+        if not is_valid_wav(final_audio_path):
+            print("[ERROR] Extracted audio is empty or invalid.")
+            raise ValueError("Extracted audio is empty or invalid.")
+        print("[INFO] Running prosody analysis...")
+        prosody_analyzer = ProsodyAnalyzer(participant_id)
+        prosodic_features = prosody_analyzer.extract_all_features()
+        print("[INFO] Prosody analysis complete.")
+    finally:
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+        # Optionally, clean up the final audio file after extraction
+        # if os.path.exists(final_audio_path):
+        #     os.remove(final_audio_path)
+
+    # Aggregate and save
+    print("[INFO] Aggregating and saving features...")
+
+    # Ensure output directory exists
+    output_dir = os.path.dirname(output_csv_path)
+    os.makedirs(output_dir, exist_ok=True)
+
+    feature_storage = FeatureStorage(output_csv_path)
+    facial_features = feature_storage.aggregate_facial_features(frames)
+    feature_storage.save_to_csv(participant_id, facial_features, prosodic_features)
+    print("[INFO] Feature extraction complete.")
+
+    return {
+        "facial_features": facial_features,
+        "prosodic_features": prosodic_features
+    }

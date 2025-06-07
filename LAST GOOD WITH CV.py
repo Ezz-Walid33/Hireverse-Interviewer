@@ -13,11 +13,13 @@ import logging
 import threading
 from queue import Queue
 from termcolor import colored
+import time
+from feature_extractor import extract_features_from_video
 
 load_dotenv()
 
-#app = Flask(__name__)
-socketio = SocketIO()
+app = Flask(__name__)
+socketio = SocketIO(app)
 
 # Redirect Flask logs and custom logs to the same file
 log = logging.getLogger('werkzeug')
@@ -141,11 +143,15 @@ def handle_connect():
 def handle_disconnect():
     print('A client disconnected!')
 
+def invoke_with_rate_limit(chain, input_data):
+    time.sleep(1)  # Add a 1-second delay between requests
+    return chain.invoke(input_data)
+
 @socketio.on('start_interview')
 def handle_start_interview(data):
-    print(colored("-----------START INTERVIEW-----------",'cyan'))
+    print(colored("-----------START INTERVIEW-----------", 'cyan'))
     users.append(InterviewUser(data['socketId'], data['name']))
-    response = greeting_chain.invoke({
+    response = invoke_with_rate_limit(greeting_chain, {
         "input": "Greet the candidate warmly.",
         "history": []
     })
@@ -153,10 +159,10 @@ def handle_start_interview(data):
     conversation_memory.chat_memory.add_ai_message(str(response.content))
     
     # Log the AI's response to the console and to the log file
-    print(f"{colored("Interviewer:","cyan")} {response.content}")
+    print(f"{colored('Interviewer:', 'cyan')} {response.content}")
     app_logger.info(f"Interviewer: {response.content}")
     
-    socketio.emit('ai_response',{ "phase": "greeting", "response": response.content, "recipient": data['socketId']})
+    socketio.emit('ai_response', {"phase": "greeting", "response": response.content, "recipient": data['socketId']})
 
 def wait_for_candidate_response(socket_id):
     """Waits for a candidate's response from the socket."""
@@ -178,11 +184,10 @@ def wait_for_candidate_response(socket_id):
     return response
     
 def small_talk(user,user_input):
-   print(colored("SMALL TALK!!!!!",'cyan'))
    conversation_memory.chat_memory.add_user_message(user_input)
         
    history = conversation_memory.chat_memory.messages
-   response = greeting_chain.invoke({
+   response = invoke_with_rate_limit(greeting_chain, {
     "input": user_input,
     "history": history
   })
@@ -203,7 +208,7 @@ def ask_behavioural(user, user_input):
         history = conversation_memory.chat_memory.messages
         
         # Generate and send each behavioral question
-        response = behavioral_chain.invoke({
+        response = invoke_with_rate_limit(behavioral_chain, {
             "input": f"""Comment briefly on the last thing they said and then ask: {question}
             Don't mention the interview process or thank them.""",
             "history": history
@@ -223,7 +228,7 @@ def ask_behavioural(user, user_input):
 
         # Generate a follow-up based on the candidate's answer
         history = conversation_memory.chat_memory.messages
-        follow_up = behavioral_chain.invoke({
+        follow_up = invoke_with_rate_limit(behavioral_chain, {
             "input": f"Generate one relevant follow-up based on: {candidate_answer}",
             "history": history
         })
@@ -253,7 +258,7 @@ def ask_technical(user, user_input):
         model_answer = question_data['Answer']
 
         # Generate the technical question
-        response = technical_chain.invoke({
+        response = invoke_with_rate_limit(technical_chain, {
             "input": f"Ask this technical question: {question}",
             "history": history
         })
@@ -272,7 +277,7 @@ def ask_technical(user, user_input):
         conversation_memory.chat_memory.add_user_message(candidate_answer)
 
         # Evaluate the candidate's answer
-        evaluation = technical_chain.invoke({
+        evaluation = invoke_with_rate_limit(technical_chain, {
             "input": f"""Evaluate this answer for '{question}':
             Expected: {model_answer}
             Candidate: {candidate_answer}
@@ -295,11 +300,11 @@ def phase_transition(user,user_input):
         }
     match user.phase:
         case "greeting":
-            response = greeting_chain.invoke(prompt)
+            response = invoke_with_rate_limit(greeting_chain, prompt)
         case "behavioural":
-            response = behavioral_chain.invoke(prompt)
+            response = invoke_with_rate_limit(behavioral_chain, prompt)
         case "technical":
-            response = technical_chain.invoke(prompt)
+            response = invoke_with_rate_limit(technical_chain, prompt)
 
     print(f"{colored("Interviewer:","cyan")} {response.content}")
     conversation_memory.chat_memory.add_ai_message(response.content) 
@@ -316,9 +321,6 @@ def phase_transition(user,user_input):
             ask_technical(user, user_input)
         case "technical":
             user.phase = "end"
-
-
-
 
 @socketio.on('message')
 def handle_message(data):
@@ -346,5 +348,30 @@ def handle_message(data):
         else:
             phase_transition(user,data['message'])
 
+@app.route('/extract_features', methods=['POST'])
+def extract_features_endpoint():
+    """
+    Expects JSON: { "participant_id": "P1", "video_filename": "user123_1712345678.webm" }
+    """
+    data = request.get_json()
+    participant_id = data.get("participant_id")
+    video_filename = data.get("video_filename")
+    if not participant_id or not video_filename:
+        return jsonify({"error": "Missing participant_id or video_filename"}), 400
+
+    # Path to the uploaded video file (adjust if needed)
+    video_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "Hireverse-Server", "server", "uploads", video_filename)
+    )
+
+    if not os.path.exists(video_path):
+        return jsonify({"error": "Video file not found"}), 404
+
+    try:
+        features = extract_features_from_video(participant_id, video_path)
+        return jsonify({"status": "success", "features": str(features)})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 if __name__ == "__main__":
-    socketio.run(create_app())
+    socketio.run(app)

@@ -2,3 +2,4 @@
 /.venv
 /Interview Files
 flask_logs.log
+/data

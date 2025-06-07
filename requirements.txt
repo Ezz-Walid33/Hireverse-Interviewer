@@ -7,3 +7,15 @@ langchain
 langchain-core
 langchain-mistralai
 termcolor
+mediapipe
+deepface
+tf-keras
+librosa
+opencv-python
+opencv-contrib-python
+mtcnn
+numpy
+scikit-learn
+praat-parselmouth
+pydub
+matplotlib
