@@ -13,6 +13,7 @@ from hireverse.schemas.frame import Frame
 from hireverse.utils.feature_storage import FeatureStorage
 from hireverse.schemas.model_features import ProsodicFeatures
 from hireverse.utils.prosody_analyzer import ProsodyAnalyzer
+from hireverse.utils.LexicalAnalyser import LexicalAnalyser
 import numpy as np
 
 def extract_audio_from_video(video_path, output_wav_path):
@@ -42,7 +43,6 @@ def extract_features_from_video(participant_id, video_path, output_csv_path=None
     print(f"[INFO] Starting feature extraction for participant: {participant_id}")
     print(f"[INFO] Video path: {video_path}")
 
-    # All outputs in Hireverse-Interviewer/data/processed
     if output_csv_path is None:
         output_csv_path = os.path.join(BASE_DIR, "data", "processed", "interview_features.csv")
     print(f"[INFO] Output CSV path: {output_csv_path}")
@@ -107,7 +107,7 @@ def extract_features_from_video(participant_id, video_path, output_csv_path=None
         result = face_analyzer.get_face_angles(frame.image, frame.facial_landmarks)
         frame.face_angles = result
 
-    # --- Extract audio from video and analyze prosody ---
+    # --- Extract audio from video and analyze prosody & lexical ---
     audio_dir = os.path.join(BASE_DIR, "data", "raw", "audio")
     os.makedirs(audio_dir, exist_ok=True)
     final_audio_path = os.path.join(audio_dir, f"trimmed_{participant_id}.wav")
@@ -122,32 +122,87 @@ def extract_features_from_video(participant_id, video_path, output_csv_path=None
         print(f"[INFO] Audio moved to final path: {final_audio_path}")
         # Check if audio is valid
         if not is_valid_wav(final_audio_path):
-            print("[ERROR] Extracted audio is empty or invalid.")
-            raise ValueError("Extracted audio is empty or invalid.")
-        print("[INFO] Running prosody analysis...")
-        prosody_analyzer = ProsodyAnalyzer(participant_id)
-        prosodic_features = prosody_analyzer.extract_all_features()
-        print("[INFO] Prosody analysis complete.")
+            print("[ERROR] Extracted audio is empty or invalid. Skipping prosodic and lexical analysis.")
+            prosodic_features = None
+            lexical_features = None
+        else:
+            print("[INFO] Running prosody analysis...")
+            try:
+                prosody_analyzer = ProsodyAnalyzer(participant_id)
+                prosodic_features = prosody_analyzer.extract_all_features()
+                print("[INFO] Prosody analysis complete.")
+            except Exception as e:
+                print(f"[ERROR] Prosody analysis failed: {e}")
+                import traceback
+                traceback.print_exc()
+                prosodic_features = None
+
+            print("[INFO] Running lexical analysis...")
+            try:
+                lexical_analyser = LexicalAnalyser(final_audio_path)
+                lexical_features = lexical_analyser.extract_all_features()
+                print("[INFO] Lexical analysis complete.")
+            except Exception as e:
+                print(f"[ERROR] Lexical analysis failed: {e}")
+                import traceback
+                traceback.print_exc()
+                lexical_features = None
     finally:
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
-        # Optionally, clean up the final audio file after extraction
-        # if os.path.exists(final_audio_path):
-        #     os.remove(final_audio_path)
+        # Always clean up the final audio file after extraction
+        if os.path.exists(final_audio_path):
+            os.remove(final_audio_path)
 
     # Aggregate and save
     print("[INFO] Aggregating and saving features...")
 
     # Ensure output directory exists
-    output_dir = os.path.dirname(output_csv_path)
+    output_dir = os.path.join(BASE_DIR, "data", "processed")
     os.makedirs(output_dir, exist_ok=True)
 
-    feature_storage = FeatureStorage(output_csv_path)
-    facial_features = feature_storage.aggregate_facial_features(frames)
-    feature_storage.save_to_csv(participant_id, facial_features, prosodic_features)
-    print("[INFO] Feature extraction complete.")
+    print(f"[DEBUG] Number of frames passed to aggregation: {len(frames)}")
+    if len(frames) == 0:
+        print("[ERROR] No frames available for aggregation. Skipping aggregation and save.")
+        facial_features = None
+        # Save empty CSVs for consistency
+        facial_csv = os.path.join(output_dir, f"{participant_id}_facial_features.csv")
+        prosodic_csv = os.path.join(output_dir, f"{participant_id}_prosodic_features.csv")
+        lexical_csv = os.path.join(output_dir, f"{participant_id}_lexical_features.csv")
+        import pandas as pd
+        pd.DataFrame().to_csv(facial_csv, index=False)
+        pd.DataFrame().to_csv(prosodic_csv, index=False)
+        pd.DataFrame().to_csv(lexical_csv, index=False)
+        return {
+            "facial_features": facial_features,
+            "prosodic_features": prosodic_features,
+            "lexical_features": lexical_features,
+            "error": "No frames available for aggregation."
+        }
+    else:
+        feature_storage = FeatureStorage(output_csv_path)
+        facial_features = feature_storage.aggregate_facial_features(frames)
+        # Save facial features
+        facial_csv = os.path.join(output_dir, f"{participant_id}_facial_features.csv")
+        import pandas as pd
+        pd.DataFrame([facial_features]).to_csv(facial_csv, index=False)
+        # Save prosodic features
+        prosodic_csv = os.path.join(output_dir, f"{participant_id}_prosodic_features.csv")
+        if prosodic_features is not None:
+            pd.DataFrame([prosodic_features]).to_csv(prosodic_csv, index=False)
+        else:
+            pd.DataFrame().to_csv(prosodic_csv, index=False)
+        # Save lexical features
+        lexical_csv = os.path.join(output_dir, f"{participant_id}_lexical_features.csv")
+        if lexical_features is not None:
+            pd.DataFrame([lexical_features]).to_csv(lexical_csv, index=False)
+        else:
+            pd.DataFrame().to_csv(lexical_csv, index=False)
 
-    return {
-        "facial_features": facial_features,
-        "prosodic_features": prosodic_features
-    }
+        print("[INFO] Feature extraction complete.")
+
+        return {
+            "facial_features": facial_features,
+            "prosodic_features": prosodic_features,
+            "lexical_features": lexical_features
+        }
