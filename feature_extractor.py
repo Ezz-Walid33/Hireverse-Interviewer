@@ -39,6 +39,10 @@ def is_valid_wav(filepath):
     except Exception:
         return False
 
+# Ensure output directory exists
+output_dir = os.path.join(BASE_DIR, "data", "processed")
+os.makedirs(output_dir, exist_ok=True)
+
 def extract_features_from_video(participant_id, video_path, output_csv_path=None):
     print(f"[INFO] Starting feature extraction for participant: {participant_id}")
     print(f"[INFO] Video path: {video_path}")
@@ -120,46 +124,55 @@ def extract_features_from_video(participant_id, video_path, output_csv_path=None
         print(f"[INFO] Audio extracted to temp file: {temp_audio_path}")
         shutil.move(temp_audio_path, final_audio_path)
         print(f"[INFO] Audio moved to final path: {final_audio_path}")
-        # Check if audio is valid
-        if not is_valid_wav(final_audio_path):
-            print("[ERROR] Extracted audio is empty or invalid. Skipping prosodic and lexical analysis.")
-            prosodic_features = None
-            lexical_features = None
-        else:
-            print("[INFO] Running prosody analysis...")
-            try:
-                prosody_analyzer = ProsodyAnalyzer(participant_id)
-                prosodic_features = prosody_analyzer.extract_all_features()
-                print("[INFO] Prosody analysis complete.")
-            except Exception as e:
-                print(f"[ERROR] Prosody analysis failed: {e}")
-                import traceback
-                traceback.print_exc()
-                prosodic_features = None
 
-            print("[INFO] Running lexical analysis...")
-            try:
-                lexical_analyser = LexicalAnalyser(final_audio_path)
-                lexical_features = lexical_analyser.extract_all_features()
-                print("[INFO] Lexical analysis complete.")
-            except Exception as e:
-                print(f"[ERROR] Lexical analysis failed: {e}")
-                import traceback
-                traceback.print_exc()
-                lexical_features = None
+        # --- COPY FOR ProsodyAnalyzer BEFORE running it ---
+        venv_src_audio_dir = os.path.abspath(
+            os.path.join(BASE_DIR, ".venv", "src", "hireverse", "data", "raw", "audio")
+        )
+        os.makedirs(venv_src_audio_dir, exist_ok=True)
+        venv_expected_audio_path = os.path.join(
+            venv_src_audio_dir, f"trimmed_{participant_id}.wav"
+        )
+        shutil.copy(final_audio_path, venv_expected_audio_path)
+        print(f"[INFO] Audio copied to venv src path for ProsodyAnalyzer: {venv_expected_audio_path}")
+        print(f"[DEBUG] File exists before ProsodyAnalyzer? {os.path.exists(venv_expected_audio_path)}")
+
+        # now run prosody & lexical
+        print("[INFO] Running prosody analysis...")
+        try:
+            prosody_analyzer = ProsodyAnalyzer(participant_id)
+            prosodic_features = prosody_analyzer.extract_all_features()
+            print("[INFO] Prosody analysis complete.")
+        except Exception as e:
+            print(f"[ERROR] Prosody analysis failed: {e}")
+            import traceback
+            traceback.print_exc()
+            prosodic_features = None
+
+        print("[INFO] Running lexical analysis...")
+        try:
+            lexical_analyser = LexicalAnalyser(final_audio_path)
+            lexical_features = lexical_analyser.extract_all_features()
+            print("[INFO] Lexical analysis complete.")
+        except Exception as e:
+            print(f"[ERROR] Lexical analysis failed: {e}")
+            import traceback
+            traceback.print_exc()
+            lexical_features = None
+
+        transcript_txt = os.path.join(output_dir, f"{participant_id}_transcript.txt")
+        if hasattr(lexical_analyser, "transcript") and lexical_analyser.transcript:
+            with open(transcript_txt, "w", encoding="utf-8") as f:
+                f.write(lexical_analyser.transcript)
+            print(f"[INFO] Transcript saved to {transcript_txt}")
     finally:
+        # only clean up after ALL processing is done
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
-        # Always clean up the final audio file after extraction
-        if os.path.exists(final_audio_path):
-            os.remove(final_audio_path)
-
     # Aggregate and save
     print("[INFO] Aggregating and saving features...")
 
-    # Ensure output directory exists
-    output_dir = os.path.join(BASE_DIR, "data", "processed")
-    os.makedirs(output_dir, exist_ok=True)
+
 
     print(f"[DEBUG] Number of frames passed to aggregation: {len(frames)}")
     if len(frames) == 0:
@@ -200,6 +213,11 @@ def extract_features_from_video(participant_id, video_path, output_csv_path=None
             pd.DataFrame().to_csv(lexical_csv, index=False)
 
         print("[INFO] Feature extraction complete.")
+
+        # now that everything is written, remove audio copies
+        for p in (final_audio_path, venv_expected_audio_path):
+            if os.path.exists(p):
+                os.remove(p)
 
         return {
             "facial_features": facial_features,
