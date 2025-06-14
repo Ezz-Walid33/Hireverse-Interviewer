@@ -54,7 +54,7 @@ def extract_features_from_video(participant_id, video_path, output_csv_path=None
     face_analyzer = FaceAnalyzer()
     print("[INFO] Extracting video frames...")
     frames = face_analyzer.get_video_frames(
-        video_path, participant_id, num_selected_frames=140
+        video_path, participant_id
     )
     print(f"[INFO] Number of frames extracted: {len(frames)}")
 
