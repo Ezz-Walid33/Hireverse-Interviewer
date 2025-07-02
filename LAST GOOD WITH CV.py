@@ -1,3 +1,5 @@
+from pydoc import text
+import string
 from flask import Flask, request, jsonify
 import pandas as pd
 import random
@@ -8,6 +10,7 @@ from langchain_mistralai.chat_models import ChatMistralAI
 from dotenv import load_dotenv
 import PyPDF2
 from langchain.schema import HumanMessage, AIMessage  # Import these classes
+import requests
 from flask_socketio import SocketIO
 import logging
 import threading
@@ -34,6 +37,11 @@ app_logger.setLevel(logging.INFO)
 app_logger.addHandler(file_handler)
 
 # Function to extract text from PDF CV
+def generate_id(length=16):
+    characters = string.ascii_letters + string.digits  # A-Z, a-z, 0-9
+    id = ''.join(random.choices(characters, k=length))
+    return id
+
 def extract_cv_text(pdf_path):
     try:
         with open(pdf_path, 'rb') as file:
@@ -114,8 +122,10 @@ def serialize_messages(messages):
 conversation_memory = ConversationBufferMemory(return_messages=True)
 
 class InterviewUser:
-    def __init__(self, socket_id, name):
+    def __init__(self, socket_id, user_id, name):
         self.socket_id = socket_id
+        self.user_id = user_id
+        self.session_id = generate_id()  # Generate a unique session ID
         self.name = name
         self.phase = "greeting"
         self.question_count=0
@@ -150,7 +160,38 @@ def invoke_with_rate_limit(chain, input_data):
 @socketio.on('start_interview')
 def handle_start_interview(data):
     print(colored("-----------START INTERVIEW-----------", 'cyan'))
-    users.append(InterviewUser(data['socketId'], data['name']))
+    print(data)
+    user=InterviewUser(data['socketId'], data['userId'], data['name'])
+    users.append(user) 
+    try:
+        response = requests.post(url=f"http://localhost:8000/apps/CODEEVAL/users/{data['userId']}/sessions/{user.session_id}",json={})
+        if response.status_code == 200:
+            print(f"Session {user.session_id} created successfully for user {data['userId']}")
+            payload = {
+                "app_name": "CODEEVAL",
+                "user_id": data["userId"],
+                "session_id": user.session_id,
+                "new_message": {
+                    "role": "user",
+                    "parts": [{
+                        "text": "Hello"
+                    }]
+                }
+            }
+            response2 = requests.post(url="http://localhost:8000/run", json=payload)
+            if response2.status_code == 200:
+                response2_data = response2.json()
+                text = response2_data[0]['content']['parts'][0]['text']
+                print(text)
+            else:
+                print(f"Request to /run failed with status code {response2.status_code}")
+                print(f"Response content: {response2.text}")
+        else:
+            print(f"Request failed with status code {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"Request exception: {e}")
+        socketio.emit('ai_response', {"phase": "error", "response": "A network error occurred. Please try again later.", "recipient": data['socketId']})
+        return
     response = invoke_with_rate_limit(greeting_chain, {
         "input": "Greet the candidate warmly.",
         "history": []
@@ -162,6 +203,7 @@ def handle_start_interview(data):
     print(f"{colored('Interviewer:', 'cyan')} {response.content}")
     app_logger.info(f"Interviewer: {response.content}")
     
+    # Always use the original socketId from the event data
     socketio.emit('ai_response', {"phase": "greeting", "response": response.content, "recipient": data['socketId']})
 
 def wait_for_candidate_response(socket_id):
@@ -191,7 +233,7 @@ def small_talk(user,user_input):
     "input": user_input,
     "history": history
   })
-   print(f"{colored("Interviewer:","cyan")} {response.content}")
+   print(f"{response.content}")
    conversation_memory.chat_memory.add_ai_message(response.content) 
    socketio.emit('ai_response', { "phase": user.phase, "response": response.content, "recipient": user.socket_id})
 
@@ -213,7 +255,8 @@ def ask_behavioural(user, user_input):
             Don't mention the interview process or thank them.""",
             "history": history
         })
-        print(f"{colored("Interviewer:","cyan")} {response.content}")
+        print(f"{colored('Interviewer:', 'cyan')} {response.content}")
+
 
         conversation_memory.chat_memory.add_ai_message(response.content)
         socketio.emit('ai_response', { 
@@ -262,7 +305,7 @@ def ask_technical(user, user_input):
             "input": f"Ask this technical question: {question}",
             "history": history
         })
-        print(f"{colored("Interviewer:","cyan")} {response.content}")
+        print(f"{colored('Interviewer:','cyan')} {response.content}")
 
         # Send the question to the candidate
         conversation_memory.chat_memory.add_ai_message(response.content)
@@ -306,7 +349,7 @@ def phase_transition(user,user_input):
         case "technical":
             response = invoke_with_rate_limit(technical_chain, prompt)
 
-    print(f"{colored("Interviewer:","cyan")} {response.content}")
+    print(f"{colored('Interviewer:','cyan')} {response.content}")
     conversation_memory.chat_memory.add_ai_message(response.content) 
     socketio.emit('ai_response', { "phase": user.phase, "response": response.content, "recipient": user.socket_id})
     
