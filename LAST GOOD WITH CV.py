@@ -18,6 +18,7 @@ from queue import Queue
 from termcolor import colored
 import time
 from feature_extractor import extract_features_from_video
+from send_message_to_ADK import send_message_to_adk #New function for sending messages to ADK
 
 load_dotenv()
 
@@ -127,6 +128,7 @@ class InterviewUser:
         self.user_id = user_id
         self.session_id = generate_id()  # Generate a unique session ID
         self.name = name
+        self.adk_connected= False
         self.phase = "greeting"
         self.question_count=0
 
@@ -166,28 +168,10 @@ def handle_start_interview(data):
     try:
         response = requests.post(url=f"http://localhost:8000/apps/CODEEVAL/users/{data['userId']}/sessions/{user.session_id}",json={})
         if response.status_code == 200:
-            print(f"Session {user.session_id} created successfully for user {data['userId']}")
-            payload = {
-                "app_name": "CODEEVAL",
-                "user_id": data["userId"],
-                "session_id": user.session_id,
-                "new_message": {
-                    "role": "user",
-                    "parts": [{
-                        "text": "Hello"
-                    }]
-                }
-            }
-            response2 = requests.post(url="http://localhost:8000/run", json=payload)
-            if response2.status_code == 200:
-                response2_data = response2.json()
-                text = response2_data[0]['content']['parts'][0]['text']
-                print(text)
-            else:
-                print(f"Request to /run failed with status code {response2.status_code}")
-                print(f"Response content: {response2.text}")
+            user.adk_connected = True
+            print(f"ADK connected for user {data['userId']} with session ID {user.session_id}")
         else:
-            print(f"Request failed with status code {response.status_code}")
+            print(f"User {data['userId']} failed to connect to ADK. Status code {response.status_code}")
     except requests.exceptions.RequestException as e:
         print(f"Request exception: {e}")
         socketio.emit('ai_response', {"phase": "error", "response": "A network error occurred. Please try again later.", "recipient": data['socketId']})

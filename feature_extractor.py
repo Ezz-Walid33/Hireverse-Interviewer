@@ -150,6 +150,7 @@ def extract_features_from_video(participant_id, video_path, output_csv_path=None
             prosodic_features = None
 
         print("[INFO] Running lexical analysis...")
+        lexical_analyser = None
         try:
             lexical_analyser = LexicalAnalyser(final_audio_path)
             lexical_features = lexical_analyser.extract_all_features()
@@ -161,7 +162,7 @@ def extract_features_from_video(participant_id, video_path, output_csv_path=None
             lexical_features = None
 
         transcript_txt = os.path.join(output_dir, f"{participant_id}_transcript.txt")
-        if hasattr(lexical_analyser, "transcript") and lexical_analyser.transcript:
+        if lexical_analyser is not None and hasattr(lexical_analyser, "transcript") and lexical_analyser.transcript:
             with open(transcript_txt, "w", encoding="utf-8") as f:
                 f.write(lexical_analyser.transcript)
             print(f"[INFO] Transcript saved to {transcript_txt}")
