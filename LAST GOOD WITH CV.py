@@ -20,6 +20,7 @@ import time
 from feature_extractor import extract_features_from_video
 from send_message_to_ADK import send_message_to_adk #New function for sending messages to ADK
 
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -90,6 +91,19 @@ technical_prompt = ChatPromptTemplate.from_messages([
     ("human", "{input}")
 ])
 
+coding_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are now assessing the candidate's coding skills. You have an assistant that gives you the coding problem, and evaluates it.
+Your job is to ask the question appropriately and provide the candidate with any hints the assistant gives you.
+Assistant:"""),
+    
+    MessagesPlaceholder(variable_name="assistant"),
+
+    ("system", "Chat History:"), 
+
+    MessagesPlaceholder(variable_name="history"),
+
+    ("human", "{input}")
+])
 
 # Extract CV text and load questions    
 cv_path = os.path.join("Interview Files", "candidate_cv.pdf")  # Adjusted to the Interview Files directory
@@ -99,6 +113,7 @@ cv_text = extract_cv_text(cv_path)
 greeting_chain = get_greeting_prompt(cv_text) | greeting_llm
 behavioral_chain = behavioral_prompt | behavioral_llm
 technical_chain = technical_prompt | technical_llm
+coding_chain = coding_prompt | technical_llm
 
 # Load technical and behavioral questions
 tech_questions = load_technical_questions(csv_path)
@@ -318,6 +333,24 @@ def ask_technical(user, user_input):
             "response": evaluation.content,
             "recipient": user.socket_id
         })
+
+def ask_coding(user, user_input):
+    history = conversation_memory.chat_memory.messages
+    adk_response = send_message_to_adk(user, "Please ask the coding question")
+    llm_response = invoke_with_rate_limit(coding_chain, {
+            "input": f"Comment on the performance of the user up until now and then ask the assistant's question",
+            "history": history,
+            "assistant": adk_response
+    })
+    response = wait_for_candidate_response(user.socket_id)
+    conversation_memory.chat_memory.add_ai_message(f"[ADK Assistant]: {adk_response}")
+    conversation_memory.chat_memory.add_ai_message(llm_response.content)
+    conversation_memory.chat_memory.add_user_message(response)
+    
+    print(f"{response.content}")
+    socketio.emit('ai_response', { "phase": user.phase, "response": llm_response.content, "recipient": user.socket_id})
+
+
 
 def phase_transition(user,user_input):
     history = conversation_memory.chat_memory.messages
