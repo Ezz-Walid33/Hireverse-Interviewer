@@ -19,6 +19,9 @@ from termcolor import colored
 import time
 from feature_extractor import extract_features_from_video
 from send_message_to_ADK import send_message_to_adk #New function for sending messages to ADK
+import traceback
+import json
+import re
 
 
 load_dotenv()
@@ -139,6 +142,12 @@ conversation_memory = ConversationBufferMemory(return_messages=True)
 
 # Define the phases as an array for easy reordering
 PHASES = [
+        {
+        "name": "technical",
+        "chain": lambda: technical_chain,
+        "question_limit": 9,
+        "ask_func": lambda user, msg: ask_technical(user, msg),
+    },
     {
         "name": "greeting",
         "chain": lambda: greeting_chain,
@@ -151,12 +160,7 @@ PHASES = [
         "question_limit": 6,
         "ask_func": lambda user, msg: ask_behavioural(user, msg),
     },
-    {
-        "name": "technical",
-        "chain": lambda: technical_chain,
-        "question_limit": 9,
-        "ask_func": lambda user, msg: ask_technical(user, msg),
-    },
+
 ]
 
 # Helper to get phase index and phase object by name
@@ -209,18 +213,44 @@ def handle_connect():
 def handle_disconnect():
     print('A client disconnected!')
 
-def invoke_with_rate_limit(chain, input_data):
-    time.sleep(1)  # Add a 1-second delay between requests
-    return chain.invoke(input_data)
+def invoke_with_rate_limit(chain, input_data, user=None):
+    try:
+        time.sleep(1)  # Add a 1-second delay between requests
+        return chain.invoke(input_data)
+    except Exception as e:
+        error_msg = f"Chain invocation error: {e}\n{traceback.format_exc()}"
+        print(error_msg)
+        app_logger.error(error_msg)
+        # Try to extract JSON error object from the exception string
+        error_obj = None
+        match = re.search(r'(\{.*\})', str(e))
+        if match:
+            try:
+                error_obj = json.loads(match.group(1))
+            except Exception:
+                error_obj = match.group(1)  # fallback: send the JSON string
+        else:
+            error_obj = str(e)
+        # Emit only the error object
+        if user is not None and hasattr(user, "user_id"):
+            socketio.emit(
+                "flask_server_error",
+                {
+                    "response": error_obj,
+                    "recipient": user.user_id,
+                },
+            )
+            print(f"Error emitted to user_id {user.user_id}")
+        return None
 
 @socketio.on('start_interview')
 def handle_start_interview(data):
     print(colored("-----------START INTERVIEW-----------", 'cyan'))
     print(data)
-    user=InterviewUser(data['socketId'], data['userId'], data['name'])
-    users.append(user) 
+    user = InterviewUser(data['socketId'], data['userId'], data['name'])
+    users.append(user)
     try:
-        response = requests.post(url=f"http://localhost:8000/apps/CODEEVAL/users/{data['userId']}/sessions/{user.session_id}",json={})
+        response = requests.post(url=f"http://localhost:8000/apps/CODEEVAL/users/{data['userId']}/sessions/{user.session_id}", json={})
         if response.status_code == 200:
             user.adk_connected = True
             print(f"ADK connected for user {data['userId']} with session ID {user.session_id}")
@@ -228,20 +258,19 @@ def handle_start_interview(data):
             print(f"User {data['userId']} failed to connect to ADK. Status code {response.status_code}")
     except requests.exceptions.RequestException as e:
         print(f"Request exception: {e}")
+        app_logger.error(f"Request exception: {e}")
         socketio.emit('ai_response', {"phase": "error", "response": "A network error occurred. Please try again later.", "recipient": data['socketId']})
         return
     response = invoke_with_rate_limit(greeting_chain, {
         "input": "Greet the candidate warmly.",
         "history": []
-    })
+    }, user)
+    if response is None:
+        return
     conversation_memory.chat_memory.add_user_message("Greet the candidate warmly")
     conversation_memory.chat_memory.add_ai_message(str(response.content))
-    
-    # Log the AI's response to the console and to the log file
     print(f"{colored('Interviewer:', 'cyan')} {response.content}")
     app_logger.info(f"Interviewer: {response.content}")
-    
-    # Always use the original socketId from the event data
     socketio.emit('ai_response', {"phase": "greeting", "response": response.content, "recipient": data['socketId']})
 
 def wait_for_candidate_response(socket_id):
@@ -270,82 +299,26 @@ def small_talk(user,user_input):
    response = invoke_with_rate_limit(greeting_chain, {
     "input": user_input,
     "history": history
-  })
+  }, user)
+   if response is None:
+        return
    print(f"{response.content}")
    conversation_memory.chat_memory.add_ai_message(response.content) 
    socketio.emit('ai_response', { "phase": user.phase, "response": response.content, "recipient": user.socket_id})
 
 def ask_behavioural(user, user_input):
-    # Use user_input to influence the first question or response
     history = conversation_memory.chat_memory.messages
-    
-    # Generate the initial response based on user_input
-
-    # Proceed with the selected behavioral questions
     selected_behavioral = random.sample(behavioral_questions, min(3, len(behavioral_questions)))
-
     for question in selected_behavioral:
         history = conversation_memory.chat_memory.messages
-        
-        # Generate and send each behavioral question
         response = invoke_with_rate_limit(behavioral_chain, {
             "input": f"""Comment briefly on the last thing they said and then ask: {question}
             Don't mention the interview process or thank them.""",
             "history": history
-        })
+        }, user)
+        if response is None:
+            return
         print(f"{colored('Interviewer:', 'cyan')} {response.content}")
-
-
-        conversation_memory.chat_memory.add_ai_message(response.content)
-        socketio.emit('ai_response', { 
-            "phase": user.phase, 
-            "response": response.content, 
-            "recipient": user.socket_id 
-        })
-
-        # Wait for the candidate's answer via socket
-        candidate_answer = wait_for_candidate_response(user.socket_id)
-        conversation_memory.chat_memory.add_user_message(candidate_answer)
-
-        # Generate a follow-up based on the candidate's answer
-        history = conversation_memory.chat_memory.messages
-        follow_up = invoke_with_rate_limit(behavioral_chain, {
-            "input": f"Generate one relevant follow-up based on: {candidate_answer}",
-            "history": history
-        })
-
-        # Send the follow-up to the candidate
-        conversation_memory.chat_memory.add_ai_message(follow_up.content)
-        socketio.emit('ai_response', { 
-            "phase": user.phase, 
-            "response": follow_up.content, 
-            "recipient": user.socket_id 
-        })
-
-        # Wait for the candidate's follow-up answer via socket
-        candidate_followup = wait_for_candidate_response(user.socket_id)
-        conversation_memory.chat_memory.add_user_message(candidate_followup)
-
-
-def ask_technical(user, user_input):
-    selected_technical = random.sample(tech_questions, 3)
-
-    # Use user_input to influence the first question or response
-    history = conversation_memory.chat_memory.messages
-
-    # Proceed with remaining technical questions
-    for question_data in selected_technical[1:]:
-        question = question_data['Question']
-        model_answer = question_data['Answer']
-
-        # Generate the technical question
-        response = invoke_with_rate_limit(technical_chain, {
-            "input": f"Ask this technical question: {question}",
-            "history": history
-        })
-        print(f"{colored('Interviewer:','cyan')} {response.content}")
-
-        # Send the question to the candidate
         conversation_memory.chat_memory.add_ai_message(response.content)
         socketio.emit('ai_response', {
             "phase": user.phase,
@@ -353,20 +326,58 @@ def ask_technical(user, user_input):
             "recipient": user.socket_id
         })
 
-        # Wait for candidate's answer
         candidate_answer = wait_for_candidate_response(user.socket_id)
         conversation_memory.chat_memory.add_user_message(candidate_answer)
 
-        # Evaluate the candidate's answer
+        history = conversation_memory.chat_memory.messages
+        follow_up = invoke_with_rate_limit(behavioral_chain, {
+            "input": f"Generate one relevant follow-up based on: {candidate_answer}",
+            "history": history
+        }, user)
+        if follow_up is None:
+            return
+        conversation_memory.chat_memory.add_ai_message(follow_up.content)
+        socketio.emit('ai_response', {
+            "phase": user.phase,
+            "response": follow_up.content,
+            "recipient": user.socket_id
+        })
+
+        candidate_followup = wait_for_candidate_response(user.socket_id)
+        conversation_memory.chat_memory.add_user_message(candidate_followup)
+
+def ask_technical(user, user_input):
+    selected_technical = random.sample(tech_questions, 3)
+    history = conversation_memory.chat_memory.messages
+    for question_data in selected_technical[1:]:
+        question = question_data['Question']
+        model_answer = question_data['Answer']
+        response = invoke_with_rate_limit(technical_chain, {
+            "input": f"Ask this technical question: {question}",
+            "history": history
+        }, user)
+        if response is None:
+            return
+        print(f"{colored('Interviewer:','cyan')} {response.content}")
+        conversation_memory.chat_memory.add_ai_message(response.content)
+        socketio.emit('ai_response', {
+            "phase": user.phase,
+            "response": response.content,
+            "recipient": user.socket_id
+        })
+
+        candidate_answer = wait_for_candidate_response(user.socket_id)
+        conversation_memory.chat_memory.add_user_message(candidate_answer)
+
         evaluation = invoke_with_rate_limit(technical_chain, {
             "input": f"""Evaluate this answer for '{question}':
             Expected: {model_answer}
             Candidate: {candidate_answer}
             Provide specific feedback and score from 1-10""",
             "history": history
-        })
-
-        # Send the evaluation to the candidate
+        }, user)
+        if evaluation is None:
+            return
         socketio.emit('evaluation', {
             "phase": user.phase,
             "response": evaluation.content,
@@ -377,21 +388,20 @@ def ask_coding(user, user_input):
     history = conversation_memory.chat_memory.messages
     adk_response = send_message_to_adk(user, "Please ask the coding question")
     llm_response = invoke_with_rate_limit(coding_chain, {
-            "input": f"Comment on the performance of the user up until now and then ask the assistant's question",
-            "history": history,
-            "assistant": adk_response
-    })
+        "input": f"Comment on the performance of the user up until now and then ask the assistant's question",
+        "history": history,
+        "assistant": adk_response
+    }, user)
+    if llm_response is None:
+        return
     response = wait_for_candidate_response(user.socket_id)
     conversation_memory.chat_memory.add_ai_message(f"[ADK Assistant]: {adk_response}")
     conversation_memory.chat_memory.add_ai_message(llm_response.content)
     conversation_memory.chat_memory.add_user_message(response)
-    
     print(f"{response.content}")
     socketio.emit('ai_response', { "phase": user.phase, "response": llm_response.content, "recipient": user.socket_id})
 
-
-
-def phase_transition(user,user_input):
+def phase_transition(user, user_input):
     history = conversation_memory.chat_memory.messages
     phase = get_phase(user.phase)
     if not phase:
@@ -399,10 +409,12 @@ def phase_transition(user,user_input):
         return
 
     prompt = {
-            "input": f"The last point in your {user.phase} phase of the interview, the user said: \"{user_input}\", Comment on it briefly and do not ask any questions.",
-            "history": history
-        }
-    response = invoke_with_rate_limit(phase["chain"](), prompt)
+        "input": f"The last point in your {user.phase} phase of the interview, the user said: \"{user_input}\", Comment on it briefly and do not ask any questions.",
+        "history": history
+    }
+    response = invoke_with_rate_limit(phase["chain"](), prompt, user)
+    if response is None:
+        return
     print(f"{colored('Interviewer:', 'cyan')} {response.content}")
     conversation_memory.chat_memory.add_ai_message(response.content)
     socketio.emit('ai_response', {"phase": user.phase, "response": response.content, "recipient": user.socket_id})
