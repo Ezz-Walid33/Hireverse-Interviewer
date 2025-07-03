@@ -137,19 +137,58 @@ def serialize_messages(messages):
 # Global memory to store conversation history
 conversation_memory = ConversationBufferMemory(return_messages=True)
 
+# Define the phases as an array for easy reordering
+PHASES = [
+    {
+        "name": "greeting",
+        "chain": lambda: greeting_chain,
+        "question_limit": 3,
+        "ask_func": lambda user, msg: small_talk(user, msg),
+    },
+    {
+        "name": "behavioural",
+        "chain": lambda: behavioral_chain,
+        "question_limit": 6,
+        "ask_func": lambda user, msg: ask_behavioural(user, msg),
+    },
+    {
+        "name": "technical",
+        "chain": lambda: technical_chain,
+        "question_limit": 9,
+        "ask_func": lambda user, msg: ask_technical(user, msg),
+    },
+]
+
+# Helper to get phase index and phase object by name
+def get_phase_index(phase_name):
+    for idx, phase in enumerate(PHASES):
+        if phase["name"] == phase_name:
+            return idx
+    return None
+
+def get_phase(phase_name):
+    idx = get_phase_index(phase_name)
+    return PHASES[idx] if idx is not None else None
+
+def get_next_phase_name(current_phase_name):
+    idx = get_phase_index(current_phase_name)
+    if idx is not None and idx + 1 < len(PHASES):
+        return PHASES[idx + 1]["name"]
+    return "end"
+
+# Update InterviewUser to track phase by name
 class InterviewUser:
     def __init__(self, socket_id, user_id, name):
         self.socket_id = socket_id
         self.user_id = user_id
-        self.session_id = generate_id()  # Generate a unique session ID
+        self.session_id = generate_id()
         self.name = name
-        self.adk_connected= False
-        self.phase = "greeting"
-        self.question_count=0
+        self.adk_connected = False
+        self.phase = PHASES[0]["name"]  # Start with the first phase
+        self.question_count = 0
 
     def __repr__(self):
         return f"InterviewUser(socket_id={self.socket_id})"
-
 
 def create_app():
     app = Flask(__name__)
@@ -354,59 +393,45 @@ def ask_coding(user, user_input):
 
 def phase_transition(user,user_input):
     history = conversation_memory.chat_memory.messages
-    prompt ={
+    phase = get_phase(user.phase)
+    if not phase:
+        print(f"Unknown phase: {user.phase}")
+        return
+
+    prompt = {
             "input": f"The last point in your {user.phase} phase of the interview, the user said: \"{user_input}\", Comment on it briefly and do not ask any questions.",
             "history": history
         }
-    match user.phase:
-        case "greeting":
-            response = invoke_with_rate_limit(greeting_chain, prompt)
-        case "behavioural":
-            response = invoke_with_rate_limit(behavioral_chain, prompt)
-        case "technical":
-            response = invoke_with_rate_limit(technical_chain, prompt)
+    response = invoke_with_rate_limit(phase["chain"](), prompt)
+    print(f"{colored('Interviewer:', 'cyan')} {response.content}")
+    conversation_memory.chat_memory.add_ai_message(response.content)
+    socketio.emit('ai_response', {"phase": user.phase, "response": response.content, "recipient": user.socket_id})
 
-    print(f"{colored('Interviewer:','cyan')} {response.content}")
-    conversation_memory.chat_memory.add_ai_message(response.content) 
-    socketio.emit('ai_response', { "phase": user.phase, "response": response.content, "recipient": user.socket_id})
-    
-    match user.phase:
-        case "greeting":
-            user.phase = "behavioural"
-            print(colored("-----------BEHAVIOURAL PHASE-----------",'cyan'))
-            ask_behavioural(user, user_input)
-        case "behavioural":
-            user.phase = "technical"
-            print(colored("-----------TECHNICAL PHASE-----------",'cyan'))
-            ask_technical(user, user_input)
-        case "technical":
-            user.phase = "end"
+    # Move to next phase if available
+    next_phase = get_next_phase_name(user.phase)
+    if next_phase != "end":
+        user.phase = next_phase
+        print(colored(f"-----------{next_phase.upper()} PHASE-----------", 'cyan'))
+        get_phase(next_phase)["ask_func"](user, user_input)
+    else:
+        user.phase = "end"
 
 @socketio.on('message')
 def handle_message(data):
     user = get_user_by_socket_id(data['socketId'])
-    print(colored(f"{user.name}: ","yellow") + data['message'])
+    print(colored(f"{user.name}: ", "yellow") + data['message'])
     app_logger.info(f"{user.name}: {data['message']}")
     user.question_count += 1
-    if user.phase == "greeting":
-        
-        if user.question_count < 3:
-            small_talk(user, data['message'])
-        else:
-            phase_transition(user,data['message'])
-            
-    elif user.phase == "behavioural":
-        if user.question_count < 6:
-            ask_behavioural(user, data['message'])
-        else:
-            phase_transition(user,data['message'])
 
-    elif user.phase == "technical":
-        
-        if user.question_count < 9:
-            ask_technical(user, data['message'])
-        else:
-            phase_transition(user,data['message'])
+    phase = get_phase(user.phase)
+    if not phase:
+        print(f"Unknown phase: {user.phase}")
+        return
+
+    if user.question_count < phase["question_limit"]:
+        phase["ask_func"](user, data['message'])
+    else:
+        phase_transition(user, data['message'])
 
 @app.route('/extract_features', methods=['POST'])
 def extract_features_endpoint():
