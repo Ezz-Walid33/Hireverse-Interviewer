@@ -96,13 +96,16 @@ technical_prompt = ChatPromptTemplate.from_messages([
 ])
 
 coding_prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are now a coding interviewer. You have an assistant that gives you the coding problem, and evaluates it.
-Your job is to ask the question appropriately and provide the candidate with any hints the assistant gives you. Do not mention anything about the interview process.
-Assistant:"""),
+    ("system", """You are a coding interviewer conducting a technical interview. You have an assistant that provides coding problems and evaluates candidate solutions.
+
+When presenting a question: Present the assistant's coding question in a natural, conversational way.
+When evaluating answers: Use the assistant's feedback to provide constructive guidance to the candidate. Be encouraging but honest about issues.
+
+Assistant's input:"""),
     
     MessagesPlaceholder(variable_name="assistant"),
 
-    ("system", "Chat History:"), 
+    ("system", "Previous conversation:"), 
 
     MessagesPlaceholder(variable_name="history"),
 
@@ -433,7 +436,7 @@ def ask_coding(user, user_input):
         # Convert the string response to a list of messages
         assistant_messages = [AIMessage(content=adk_response)]
         llm_response = invoke_with_rate_limit(coding_chain, {
-            "input": f"Curate the assistant's observations and feedback appropriately as an interviewer.",
+            "input": f"The candidate provided this solution: '{user_input}'. Based on the assistant's evaluation, provide natural feedback and guidance as an interviewer. Do not repeat the question.",
             "history": history,
             "assistant": assistant_messages
         }, user)
