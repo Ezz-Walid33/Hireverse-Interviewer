@@ -98,7 +98,10 @@ technical_prompt = ChatPromptTemplate.from_messages([
 coding_prompt = ChatPromptTemplate.from_messages([
     ("system", """You are a coding interviewer conducting a technical interview. You have an assistant that provides coding problems and evaluates candidate solutions.
 
-IMPORTANT: Always use EXACTLY what the assistant provides. Do not create your own questions or modify the assistant's content.
+IMPORTANT: 
+- Always use EXACTLY what the assistant provides. Do not create your own questions or modify the assistant's content.
+- DO NOT mention the assistant or reference "[ADK Assistant]" in your responses.
+- Present the content as if it's coming directly from you as the interviewer.
 
 When presenting a question: Present the assistant's exact coding question without modification.
 When evaluating answers: Use the assistant's exact feedback without modification.
@@ -399,7 +402,6 @@ def ask_technical(user, user_input):
 def ask_coding(user, user_input):
     # Add the user's input to conversation history
     conversation_memory.chat_memory.add_user_message(user_input)
-    history = conversation_memory.chat_memory.messages
     
     # If this is the first time in coding phase, ask for a coding question
     if not user.coding_question_asked:
@@ -409,24 +411,14 @@ def ask_coding(user, user_input):
             print("No response from ADK")
             return
         
-        assistant_messages = [AIMessage(content=adk_response)]
-        llm_response = invoke_with_rate_limit(coding_chain, {
-            "input": f"Present exactly what the assistant has provided. Do not modify or add your own questions.",
-            "history": history,
-            "assistant": assistant_messages
-        }, user)
-        if llm_response is None:
-            return
-        
         user.coding_question_asked = True
         
-        conversation_memory.chat_memory.add_ai_message(f"[ADK Assistant]: {adk_response}")
-        conversation_memory.chat_memory.add_ai_message(llm_response.content)
+        # Send ADK response directly to the user
+        conversation_memory.chat_memory.add_ai_message(adk_response)
         
         print(f"ADK Response: {adk_response}")
-        print(f"LLM Response: {llm_response.content}")
         
-        socketio.emit('ai_response', { "phase": user.phase, "response": llm_response.content, "recipient": user.socket_id})
+        socketio.emit('ai_response', { "phase": user.phase, "response": adk_response, "recipient": user.socket_id})
     
     else:
         # Send the user's answer to ADK for evaluation
@@ -435,25 +427,13 @@ def ask_coding(user, user_input):
             print("No response from ADK")
             return
         
-        # Convert the string response to a list of messages
-        assistant_messages = [AIMessage(content=adk_response)]
-        llm_response = invoke_with_rate_limit(coding_chain, {
-            "input": f"The candidate provided: '{user_input}'. Present exactly what the assistant has evaluated. Do not add your own feedback.",
-            "history": history,
-            "assistant": assistant_messages
-        }, user)
-        if llm_response is None:
-            return
-        
-        # Add responses to conversation memory
-        conversation_memory.chat_memory.add_ai_message(f"[ADK Assistant]: {adk_response}")
-        conversation_memory.chat_memory.add_ai_message(llm_response.content)
+        # Send ADK evaluation directly to the user
+        conversation_memory.chat_memory.add_ai_message(adk_response)
         
         print(f"ADK Evaluation: {adk_response}")
-        print(f"LLM Response: {llm_response.content}")
         
         # Send the evaluation response to the user
-        socketio.emit('ai_response', { "phase": user.phase, "response": llm_response.content, "recipient": user.socket_id})
+        socketio.emit('ai_response', { "phase": user.phase, "response": adk_response, "recipient": user.socket_id})
 
 def phase_transition(user, user_input):
     history = conversation_memory.chat_memory.messages
