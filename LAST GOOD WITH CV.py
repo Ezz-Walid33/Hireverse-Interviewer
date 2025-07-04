@@ -96,8 +96,8 @@ technical_prompt = ChatPromptTemplate.from_messages([
 ])
 
 coding_prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are now assessing the candidate's coding skills. You have an assistant that gives you the coding problem, and evaluates it.
-Your job is to ask the question appropriately and provide the candidate with any hints the assistant gives you.
+    ("system", """You are now a coding interviewer. You have an assistant that gives you the coding problem, and evaluates it.
+Your job is to ask the question appropriately and provide the candidate with any hints the assistant gives you. Do not mention anything about the interview process.
 Assistant:"""),
     
     MessagesPlaceholder(variable_name="assistant"),
@@ -149,12 +149,6 @@ PHASES = [
         "question_limit": 6,
         "ask_func": lambda user, msg: ask_coding(user, msg),
     },
-        {
-        "name": "technical",
-        "chain": lambda: technical_chain,
-        "question_limit": 9,
-        "ask_func": lambda user, msg: ask_technical(user, msg),
-    },
     {
         "name": "greeting",
         "chain": lambda: greeting_chain,
@@ -167,7 +161,12 @@ PHASES = [
         "question_limit": 6,
         "ask_func": lambda user, msg: ask_behavioural(user, msg),
     },
-
+    {
+        "name": "technical",
+        "chain": lambda: technical_chain,
+        "question_limit": 9,
+        "ask_func": lambda user, msg: ask_technical(user, msg),
+    },
 ]
 
 # Helper to get phase index and phase object by name
@@ -197,6 +196,7 @@ class InterviewUser:
         self.adk_connected = False
         self.phase = PHASES[0]["name"]  # Start with the first phase
         self.question_count = 0
+        self.coding_question_asked = False  # Track if coding question has been asked
 
     def __repr__(self):
         return f"InterviewUser(socket_id={self.socket_id})"
@@ -392,23 +392,63 @@ def ask_technical(user, user_input):
         })
 
 def ask_coding(user, user_input):
+    # Add the user's input to conversation history
+    conversation_memory.chat_memory.add_user_message(user_input)
     history = conversation_memory.chat_memory.messages
-    adk_response = send_message_to_adk(user, "Please ask the coding question")
-    # Convert the string response to a list of messages
-    assistant_messages = [AIMessage(content=adk_response)] if adk_response else []
-    llm_response = invoke_with_rate_limit(coding_chain, {
-        "input": f"Comment on the performance of the user up until now and then ask the assistant's question",
-        "history": history,
-        "assistant": assistant_messages
-    }, user)
-    if llm_response is None:
-        return
-    response = wait_for_candidate_response(user.socket_id)
-    conversation_memory.chat_memory.add_ai_message(f"[ADK Assistant]: {adk_response}")
-    conversation_memory.chat_memory.add_ai_message(llm_response.content)
-    conversation_memory.chat_memory.add_user_message(response)
-    print(f"{response.content}")
-    socketio.emit('ai_response', { "phase": user.phase, "response": llm_response.content, "recipient": user.socket_id})
+    
+    # If this is the first time in coding phase, ask for a coding question
+    if not user.coding_question_asked:
+        
+        adk_response = send_message_to_adk(user, "Please ask the coding question")
+        if not adk_response:
+            print("No response from ADK")
+            return
+        
+        assistant_messages = [AIMessage(content=adk_response)]
+        llm_response = invoke_with_rate_limit(coding_chain, {
+            "input": f"Present the assistant's coding question to the candidate in a natural way.",
+            "history": history,
+            "assistant": assistant_messages
+        }, user)
+        if llm_response is None:
+            return
+        
+        user.coding_question_asked = True
+        
+        conversation_memory.chat_memory.add_ai_message(f"[ADK Assistant]: {adk_response}")
+        conversation_memory.chat_memory.add_ai_message(llm_response.content)
+        
+        print(f"ADK Response: {adk_response}")
+        print(f"LLM Response: {llm_response.content}")
+        
+        socketio.emit('ai_response', { "phase": user.phase, "response": llm_response.content, "recipient": user.socket_id})
+    
+    else:
+        # Send the user's answer to ADK for evaluation
+        adk_response = send_message_to_adk(user, user_input)
+        if not adk_response:
+            print("No response from ADK")
+            return
+        
+        # Convert the string response to a list of messages
+        assistant_messages = [AIMessage(content=adk_response)]
+        llm_response = invoke_with_rate_limit(coding_chain, {
+            "input": f"Curate the assistant's observations and feedback appropriately as an interviewer.",
+            "history": history,
+            "assistant": assistant_messages
+        }, user)
+        if llm_response is None:
+            return
+        
+        # Add responses to conversation memory
+        conversation_memory.chat_memory.add_ai_message(f"[ADK Assistant]: {adk_response}")
+        conversation_memory.chat_memory.add_ai_message(llm_response.content)
+        
+        print(f"ADK Evaluation: {adk_response}")
+        print(f"LLM Response: {llm_response.content}")
+        
+        # Send the evaluation response to the user
+        socketio.emit('ai_response', { "phase": user.phase, "response": llm_response.content, "recipient": user.socket_id})
 
 def phase_transition(user, user_input):
     history = conversation_memory.chat_memory.messages
