@@ -65,9 +65,10 @@ def load_technical_questions(csv_path):
     return df[['Question', 'Answer']].to_dict('records')
 
 # Initialize LLMs
-greeting_llm = ChatMistralAI(model_name="mistral-large-latest", temperature=0.7)
-behavioral_llm = ChatMistralAI(model_name="mistral-large-latest", temperature=0.6)
-technical_llm = ChatMistralAI(model_name="mistral-large-latest", temperature=0.5)
+from langchain_groq import ChatGroq
+greeting_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.6)
+behavioral_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.6)
+technical_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.6)
 
 # Create prompt templates
 def get_greeting_prompt(cv_text):
@@ -142,6 +143,12 @@ conversation_memory = ConversationBufferMemory(return_messages=True)
 
 # Define the phases as an array for easy reordering
 PHASES = [
+    {
+        "name": "coding",
+        "chain": lambda: coding_chain,
+        "question_limit": 6,
+        "ask_func": lambda user, msg: ask_coding(user, msg),
+    },
         {
         "name": "technical",
         "chain": lambda: technical_chain,
@@ -387,10 +394,12 @@ def ask_technical(user, user_input):
 def ask_coding(user, user_input):
     history = conversation_memory.chat_memory.messages
     adk_response = send_message_to_adk(user, "Please ask the coding question")
+    # Convert the string response to a list of messages
+    assistant_messages = [AIMessage(content=adk_response)] if adk_response else []
     llm_response = invoke_with_rate_limit(coding_chain, {
         "input": f"Comment on the performance of the user up until now and then ask the assistant's question",
         "history": history,
-        "assistant": adk_response
+        "assistant": assistant_messages
     }, user)
     if llm_response is None:
         return
@@ -431,6 +440,7 @@ def phase_transition(user, user_input):
 @socketio.on('message')
 def handle_message(data):
     user = get_user_by_socket_id(data['socketId'])
+    print(f"{data} ::: {user}")
     print(colored(f"{user.name}: ", "yellow") + data['message'])
     app_logger.info(f"{user.name}: {data['message']}")
     user.question_count += 1

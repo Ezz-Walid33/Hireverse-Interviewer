@@ -3,7 +3,7 @@ import requests
 def send_message_to_adk(user, message):
     payload = {
         "app_name": "CODEEVAL",
-        "user_id": user["userId"],
+        "user_id": user.user_id,
         "session_id": user.session_id,
         "new_message": {
             "role": "user",

@@ -3,3 +3,5 @@
 /Interview Files
 flask_logs.log
 /data
+.pyc
+/__pycache__
