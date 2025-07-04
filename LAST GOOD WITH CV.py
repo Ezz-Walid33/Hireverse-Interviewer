@@ -14,7 +14,6 @@ import requests
 from flask_socketio import SocketIO
 import logging
 import threading
-from queue import Queue
 from termcolor import colored
 import time
 from feature_extractor import extract_features_from_video
@@ -76,21 +75,29 @@ def get_greeting_prompt(cv_text):
         ("system", f"""You are a professional interviewer conducting a job interview. 
         The candidate's CV contains this information:
         {cv_text}
-        Maintain a friendly but professional tone."""),
+        Maintain a friendly but professional tone. Ask ONE question at a time and wait 
+        for their response before proceeding. Keep responses concise and conversational."""),
         MessagesPlaceholder(variable_name="history"),
         ("human", "{input}")
     ])
 behavioral_prompt = ChatPromptTemplate.from_messages([
     ("system", """You are conducting a behavioral interview. Ask questions that reveal 
     the candidate's soft skills, problem-solving approach, and cultural fit.
-    Ask follow-up questions when interesting points emerge."""),
+    Ask ONE question at a time and wait for their response. Keep conversations natural 
+    by focusing on one topic before moving to the next. When you need follow-up details, 
+    ask one specific follow-up question rather than multiple questions at once.
+    Avoid excessive thanking or overly positive language. Keep responses professional and focused."""),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}")
 ])
 
 technical_prompt = ChatPromptTemplate.from_messages([
     ("system", """You are a technical interviewer. Ask questions precisely and 
-    evaluate answers professionally."""),
+    evaluate answers professionally. Ask ONE technical question at a time and wait 
+    for their response before proceeding to the next question.
+    When providing feedback on answers, be brief and constructive without giving away 
+    correct answers. Focus on one concept at a time for clear understanding.
+    Avoid thanking the candidate repeatedly."""),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}")
 ])
@@ -152,12 +159,6 @@ conversation_memory = ConversationBufferMemory(return_messages=True)
 # Define the phases as an array for easy reordering
 PHASES = [
     {
-        "name": "coding",
-        "chain": lambda: coding_chain,
-        "question_limit": 6,
-        "ask_func": lambda user, msg: ask_coding(user, msg),
-    },
-    {
         "name": "greeting",
         "chain": lambda: greeting_chain,
         "question_limit": 3,
@@ -166,14 +167,20 @@ PHASES = [
     {
         "name": "behavioural",
         "chain": lambda: behavioral_chain,
-        "question_limit": 6,
+        "question_limit": 3,
         "ask_func": lambda user, msg: ask_behavioural(user, msg),
     },
     {
         "name": "technical",
         "chain": lambda: technical_chain,
-        "question_limit": 9,
+        "question_limit": 3,
         "ask_func": lambda user, msg: ask_technical(user, msg),
+    },
+    {
+        "name": "coding",
+        "chain": lambda: coding_chain,
+        "question_limit": 3,
+        "ask_func": lambda user, msg: ask_coding(user, msg),
     },
 ]
 
@@ -288,51 +295,63 @@ def handle_start_interview(data):
     app_logger.info(f"Interviewer: {response.content}")
     socketio.emit('ai_response', {"phase": "greeting", "response": response.content, "recipient": data['socketId']})
 
-def wait_for_candidate_response(socket_id):
-    """Waits for a candidate's response from the socket."""
-    response_queue = Queue()
 
-    def on_response(data):
-        if data['socketId'] == socket_id:
-            response_queue.put(data['message'])
-
-    # Set up a temporary event listener
-    socketio.on('candidate_response', on_response)
-
-    # Block until a response is received
-    response = response_queue.get()
-
-    # Remove the temporary listener
-    socketio.off('candidate_response', on_response)
-
-    return response
-    
-def small_talk(user,user_input):
-   conversation_memory.chat_memory.add_user_message(user_input)
+def small_talk(user, user_input):
+    conversation_memory.chat_memory.add_user_message(user_input)
         
-   history = conversation_memory.chat_memory.messages
-   response = invoke_with_rate_limit(greeting_chain, {
-    "input": user_input,
-    "history": history
-  }, user)
-   if response is None:
+    history = conversation_memory.chat_memory.messages
+    
+    # Tailor response based on question count in greeting phase
+    if user.question_count == 1:
+        prompt_text = "Respond warmly to their introduction and ask ONE question about themselves or their background."
+    elif user.question_count == 2:
+        prompt_text = "Comment briefly on what they shared and ask ONE follow-up question about their experiences or interests."
+    else:
+        prompt_text = "Acknowledge what they said and make a brief transition comment about moving to the next part of the interview."
+    
+    response = invoke_with_rate_limit(greeting_chain, {
+        "input": prompt_text,
+        "history": history
+    }, user)
+    
+    if response is None:
         return
-   print(f"{response.content}")
-   conversation_memory.chat_memory.add_ai_message(response.content) 
-   socketio.emit('ai_response', { "phase": user.phase, "response": response.content, "recipient": user.socket_id})
+        
+    print(f"{response.content}")
+    conversation_memory.chat_memory.add_ai_message(response.content) 
+    socketio.emit('ai_response', { "phase": user.phase, "response": response.content, "recipient": user.socket_id})
 
 def ask_behavioural(user, user_input):
+    # Add user input to conversation history
+    conversation_memory.chat_memory.add_user_message(user_input)
+    
+    # Initialize behavioral questions if not already done
+    if not hasattr(user, 'behavioral_questions'):
+        user.behavioral_questions = random.sample(behavioral_questions, min(3, len(behavioral_questions)))
+    
     history = conversation_memory.chat_memory.messages
-    selected_behavioral = random.sample(behavioral_questions, min(3, len(behavioral_questions)))
-    for question in selected_behavioral:
-        history = conversation_memory.chat_memory.messages
+    
+    # Determine which question to ask based on question count
+    question_index = user.question_count - 1
+    
+    if question_index < len(user.behavioral_questions):
+        question = user.behavioral_questions[question_index]
+        
+        if user.question_count == 1:
+            # First behavioral question - just ask the main question
+            prompt_text = f"Ask this behavioral question: {question}"
+        else:
+            # Subsequent questions - ask ONE follow-up to get more details, then move to next question
+            prompt_text = f"Ask ONE follow-up question to get more specific details about their previous answer. If they've provided enough detail, move on to ask: {question}"
+            
         response = invoke_with_rate_limit(behavioral_chain, {
-            "input": f"""Comment briefly on the last thing they said and then ask: {question}
-            Don't mention the interview process or thank them.""",
+            "input": prompt_text,
             "history": history
         }, user)
+        
         if response is None:
             return
+            
         print(f"{colored('Interviewer:', 'cyan')} {response.content}")
         conversation_memory.chat_memory.add_ai_message(response.content)
         socketio.emit('ai_response', {
@@ -341,61 +360,43 @@ def ask_behavioural(user, user_input):
             "recipient": user.socket_id
         })
 
-        candidate_answer = wait_for_candidate_response(user.socket_id)
-        conversation_memory.chat_memory.add_user_message(candidate_answer)
-
-        history = conversation_memory.chat_memory.messages
-        follow_up = invoke_with_rate_limit(behavioral_chain, {
-            "input": f"Generate one relevant follow-up based on: {candidate_answer}",
-            "history": history
-        }, user)
-        if follow_up is None:
-            return
-        conversation_memory.chat_memory.add_ai_message(follow_up.content)
-        socketio.emit('ai_response', {
-            "phase": user.phase,
-            "response": follow_up.content,
-            "recipient": user.socket_id
-        })
-
-        candidate_followup = wait_for_candidate_response(user.socket_id)
-        conversation_memory.chat_memory.add_user_message(candidate_followup)
-
 def ask_technical(user, user_input):
-    selected_technical = random.sample(tech_questions, 3)
+    # Add user input to conversation history
+    conversation_memory.chat_memory.add_user_message(user_input)
+    
+    # Initialize technical questions if not already done
+    if not hasattr(user, 'technical_questions'):
+        user.technical_questions = random.sample(tech_questions, min(3, len(tech_questions)))
+    
     history = conversation_memory.chat_memory.messages
-    for question_data in selected_technical[1:]:
+    
+    # Determine which question to ask based on question count
+    question_index = user.question_count - 1
+    
+    if question_index < len(user.technical_questions):
+        question_data = user.technical_questions[question_index]
         question = question_data['Question']
-        model_answer = question_data['Answer']
+        
+        if user.question_count == 1:
+            # First technical question - just ask the main question
+            prompt_text = f"Ask this technical question: {question}"
+        else:
+            # Subsequent questions - provide brief feedback and ask next question
+            prompt_text = f"Provide brief feedback on their technical answer without giving away correct answers. Then ask: {question}"
+            
         response = invoke_with_rate_limit(technical_chain, {
-            "input": f"Ask this technical question: {question}",
+            "input": prompt_text,
             "history": history
         }, user)
+        
         if response is None:
             return
-        print(f"{colored('Interviewer:','cyan')} {response.content}")
+            
+        print(f"{colored('Interviewer:', 'cyan')} {response.content}")
         conversation_memory.chat_memory.add_ai_message(response.content)
         socketio.emit('ai_response', {
             "phase": user.phase,
             "response": response.content,
-            "recipient": user.socket_id
-        })
-
-        candidate_answer = wait_for_candidate_response(user.socket_id)
-        conversation_memory.chat_memory.add_user_message(candidate_answer)
-
-        evaluation = invoke_with_rate_limit(technical_chain, {
-            "input": f"""Evaluate this answer for '{question}':
-            Expected: {model_answer}
-            Candidate: {candidate_answer}
-            Provide specific feedback and score from 1-10""",
-            "history": history
-        }, user)
-        if evaluation is None:
-            return
-        socketio.emit('evaluation', {
-            "phase": user.phase,
-            "response": evaluation.content,
             "recipient": user.socket_id
         })
 
@@ -436,14 +437,18 @@ def ask_coding(user, user_input):
         socketio.emit('ai_response', { "phase": user.phase, "response": adk_response, "recipient": user.socket_id})
 
 def phase_transition(user, user_input):
+    # Add user input to conversation history
+    conversation_memory.chat_memory.add_user_message(user_input)
+    
     history = conversation_memory.chat_memory.messages
     phase = get_phase(user.phase)
     if not phase:
         print(f"Unknown phase: {user.phase}")
         return
 
+    # Generate a comment on the last response in this phase
     prompt = {
-        "input": f"The last point in your {user.phase} phase of the interview, the user said: \"{user_input}\", Comment on it briefly and do not ask any questions.",
+        "input": f"The candidate just said: \"{user_input}\" in the {user.phase} phase. Comment on it briefly and positively. Do not ask any questions.",
         "history": history
     }
     response = invoke_with_rate_limit(phase["chain"](), prompt, user)
@@ -457,10 +462,26 @@ def phase_transition(user, user_input):
     next_phase = get_next_phase_name(user.phase)
     if next_phase != "end":
         user.phase = next_phase
+        user.question_count = 0  # Reset question count for new phase
         print(colored(f"-----------{next_phase.upper()} PHASE-----------", 'cyan'))
-        get_phase(next_phase)["ask_func"](user, user_input)
+        
+        # Special handling for coding phase transition
+        if next_phase == "coding":
+            # For coding phase, we need to ask for the first coding question
+            user.question_count = 1  # Set to 1 since we're starting the phase
+            ask_coding(user, "Please ask me a coding question")
+        else:
+            # For other phases, use the normal ask function with a greeting message
+            user.question_count = 1  # Set to 1 since we're starting the phase  
+            get_phase(next_phase)["ask_func"](user, f"Let's start the {next_phase} phase")
     else:
         user.phase = "end"
+        # Interview completed
+        socketio.emit('ai_response', {
+            "phase": "end", 
+            "response": "Thank you for participating in this interview. We will be in touch soon with our decision.",
+            "recipient": user.socket_id
+        })
 
 @socketio.on('message')
 def handle_message(data):
@@ -468,6 +489,11 @@ def handle_message(data):
     print(f"{data} ::: {user}")
     print(colored(f"{user.name}: ", "yellow") + data['message'])
     app_logger.info(f"{user.name}: {data['message']}")
+    
+    # Skip processing if interview is ended
+    if user.phase == "end":
+        return
+    
     user.question_count += 1
 
     phase = get_phase(user.phase)
@@ -475,9 +501,12 @@ def handle_message(data):
         print(f"Unknown phase: {user.phase}")
         return
 
-    if user.question_count < phase["question_limit"]:
+    print(f"Phase: {user.phase}, Question count: {user.question_count}, Limit: {phase['question_limit']}")
+
+    if user.question_count <= phase["question_limit"]:
         phase["ask_func"](user, data['message'])
     else:
+        # Transition to next phase
         phase_transition(user, data['message'])
 
 @app.route('/extract_features', methods=['POST'])
