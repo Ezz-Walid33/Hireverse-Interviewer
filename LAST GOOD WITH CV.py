@@ -65,9 +65,9 @@ def load_technical_questions(csv_path):
 
 # Initialize LLMs
 from langchain_groq import ChatGroq
-greeting_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.6)
-behavioral_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.6)
-technical_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.6)
+greeting_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.7)
+behavioral_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.7)
+technical_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.7)
 
 # Create prompt templates
 def get_greeting_prompt(cv_text):
@@ -76,7 +76,8 @@ def get_greeting_prompt(cv_text):
         The candidate's CV contains this information:
         {cv_text}
         Maintain a friendly but professional tone. Ask ONE question at a time and wait 
-        for their response before proceeding. Keep responses concise and conversational."""),
+        for their response before proceeding. Keep responses concise and conversational.
+        DO NOT THANK THE CANDIDATE"""),
         MessagesPlaceholder(variable_name="history"),
         ("human", "{input}")
     ])
@@ -86,7 +87,7 @@ behavioral_prompt = ChatPromptTemplate.from_messages([
     Ask ONE question at a time and wait for their response. Keep conversations natural 
     by focusing on one topic before moving to the next. When you need follow-up details, 
     ask one specific follow-up question rather than multiple questions at once.
-    Avoid excessive thanking or overly positive language. Keep responses professional and focused."""),
+    DONT THANK THE CANDIDATE or use overly positive language. Keep responses professional and focused."""),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}")
 ])
@@ -97,7 +98,7 @@ technical_prompt = ChatPromptTemplate.from_messages([
     for their response before proceeding to the next question.
     When providing feedback on answers, be brief and constructive without giving away 
     correct answers. Focus on one concept at a time for clear understanding.
-    Avoid thanking the candidate repeatedly."""),
+    DO NOT THANK THE CANDIDATE."""),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}")
 ])
@@ -284,13 +285,14 @@ def handle_start_interview(data):
         socketio.emit('ai_response', {"phase": "error", "response": "A network error occurred. Please try again later.", "recipient": data['socketId']})
         return
     response = invoke_with_rate_limit(greeting_chain, {
-        "input": "Greet the candidate warmly.",
+        "input": "Greet the candidate warmly and ask ONE question to get to know them better.",
         "history": []
     }, user)
     if response is None:
         return
-    conversation_memory.chat_memory.add_user_message("Greet the candidate warmly")
     conversation_memory.chat_memory.add_ai_message(str(response.content))
+    # Increment question count since we asked the first question
+    user.question_count = 1
     print(f"{colored('Interviewer:', 'cyan')} {response.content}")
     app_logger.info(f"Interviewer: {response.content}")
     socketio.emit('ai_response', {"phase": "greeting", "response": response.content, "recipient": data['socketId']})
@@ -303,9 +305,9 @@ def small_talk(user, user_input):
     
     # Tailor response based on question count in greeting phase
     if user.question_count == 1:
-        prompt_text = "Respond warmly to their introduction and ask ONE question about themselves or their background."
+        prompt_text = "Respond warmly to their answer and ask ONE follow-up question to learn more about their background or interests."
     elif user.question_count == 2:
-        prompt_text = "Comment briefly on what they shared and ask ONE follow-up question about their experiences or interests."
+        prompt_text = "Comment positively on what they shared and ask ONE more question about their experiences or goals."
     else:
         prompt_text = "Acknowledge what they said and make a brief transition comment about moving to the next part of the interview."
     
