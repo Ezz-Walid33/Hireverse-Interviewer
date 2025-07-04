@@ -98,8 +98,10 @@ technical_prompt = ChatPromptTemplate.from_messages([
 coding_prompt = ChatPromptTemplate.from_messages([
     ("system", """You are a coding interviewer conducting a technical interview. You have an assistant that provides coding problems and evaluates candidate solutions.
 
-When presenting a question: Present the assistant's coding question in a natural, conversational way.
-When evaluating answers: Use the assistant's feedback to provide constructive guidance to the candidate. Be encouraging but honest about issues.
+IMPORTANT: Always use EXACTLY what the assistant provides. Do not create your own questions or modify the assistant's content.
+
+When presenting a question: Present the assistant's exact coding question without modification.
+When evaluating answers: Use the assistant's exact feedback without modification.
 
 Assistant's input:"""),
     
@@ -409,7 +411,7 @@ def ask_coding(user, user_input):
         
         assistant_messages = [AIMessage(content=adk_response)]
         llm_response = invoke_with_rate_limit(coding_chain, {
-            "input": f"Present the assistant's coding question to the candidate in a natural way.",
+            "input": f"Present exactly what the assistant has provided. Do not modify or add your own questions.",
             "history": history,
             "assistant": assistant_messages
         }, user)
@@ -436,7 +438,7 @@ def ask_coding(user, user_input):
         # Convert the string response to a list of messages
         assistant_messages = [AIMessage(content=adk_response)]
         llm_response = invoke_with_rate_limit(coding_chain, {
-            "input": f"The candidate provided this solution: '{user_input}'. Based on the assistant's evaluation, provide natural feedback and guidance as an interviewer. Do not repeat the question.",
+            "input": f"The candidate provided: '{user_input}'. Present exactly what the assistant has evaluated. Do not add your own feedback.",
             "history": history,
             "assistant": assistant_messages
         }, user)
