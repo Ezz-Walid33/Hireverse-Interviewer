@@ -135,13 +135,19 @@ Your evaluation should include:
 3. Areas for improvement
 4. Specific examples from the conversation to support your assessment
 5. Recommendations for the candidate's development
+
 Be objective, constructive, and specific in your feedback. Focus on communication skills, technical knowledge (if applicable), problem-solving approach, and overall interview performance in this phase.
-PROVIDE A SCORE FROM 1 TO 100 AT THE END OF YOUR RESPONSE"""),
+
+IMPORTANT: You MUST end your response with EXACTLY this format on the last line:
+SCORE: [number from 1-100]
+
+Example:
+SCORE: 75"""),
     ("human", """Please evaluate the following interview conversation from the {phase_name} phase:
 
 {conversation_history}
 
-Provide a score from 1 to 100 at the very end of your response.""")
+Remember to end with the exact format: SCORE: [number from 1-100]""")
 ])
 
 # Extract CV text and load questions    
@@ -300,6 +306,8 @@ def invoke_with_rate_limit(chain, input_data, user=None):
         return None
 
 def evaluation(phase_history, phase_name):
+    if not phase_history:
+        return f"No conversation data available for {phase_name} phase evaluation."
     
     conversation_text = "\n".join(phase_history)
     
@@ -313,6 +321,21 @@ def evaluation(phase_history, phase_name):
         error_msg = f"Error evaluating {phase_name} phase: {e}"
         print(error_msg)
         return error_msg
+
+def extract_score_from_evaluation(evaluation_text):
+    try:
+        import re
+        pattern = r'SCORE:\s*(\d+)'
+        match = re.search(pattern, evaluation_text)
+        if match:
+            score = int(match.group(1))
+
+            if 1 <= score <= 100:
+                return score
+        return None
+    except Exception as e:
+        print(f"Error extracting score: {e}")
+        return None
 
 
 @socketio.on('start_interview')
@@ -444,7 +467,7 @@ def ask_technical(user, user_input):
         
         if user.question_count == 1:
             # First technical question - just ask the main question
-            prompt_text = f"Ask the candidate this technical question in a professional manner. Declare that you are now going to ask a few technical questions: {question}"
+            prompt_text = f"Declare that you are now going to ask a few technical questions, then ask this question: {question}"
         else:
             # Subsequent questions - provide brief feedback and ask next question
             prompt_text = f"Provide brief feedback on their technical answer without giving away correct answers. Then ask: {question}"
@@ -500,9 +523,7 @@ def ask_coding(user, user_input):
             print("No response from ADK")
             return
         
-        # Send ADK evaluation directly to the user
         conversation_memory.chat_memory.add_ai_message(adk_response)
-        # Store AI response in coding phase history
         coding_phase_history.append(f"AI: {adk_response}")
         
         print(f"ADK Evaluation: {adk_response}")
