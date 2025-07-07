@@ -198,17 +198,11 @@ conversation_memory = ConversationBufferMemory(return_messages=True)
 
 # Define the phases as an array for easy reordering
 PHASES = [
-    #{
-    #    "name": "greeting",
-    #    "chain": lambda: greeting_chain,
-    #    "question_limit": 3,
-    #    "ask_func": lambda user, msg: small_talk(user, msg),
-    #},
     {
-        "name": "coding",
-        "chain": lambda: coding_chain,
-        "question_limit": 3,
-        "ask_func": lambda user, msg: ask_coding(user, msg),
+       "name": "greeting",
+       "chain": lambda: greeting_chain,
+       "question_limit": 3,
+       "ask_func": lambda user, msg: small_talk(user, msg),
     },
     {
         "name": "behavioural",
@@ -221,8 +215,13 @@ PHASES = [
         "chain": lambda: technical_chain,
         "question_limit": 3,
         "ask_func": lambda user, msg: ask_technical(user, msg),
+    },
+        {
+        "name": "coding",
+        "chain": lambda: coding_chain,
+        "question_limit": 3,
+        "ask_func": lambda user, msg: ask_coding(user, msg),
     }
-    
 ]
 
 # Helper to get phase index and phase object by name
@@ -244,8 +243,7 @@ def get_next_phase_name(current_phase_name):
 
 # Update InterviewUser to track phase by name
 class InterviewUser:
-    def __init__(self, socket_id, user_id, name):
-        self.socket_id = socket_id
+    def __init__(self, user_id, name):
         self.user_id = user_id
         self.session_id = generate_id()
         self.name = name
@@ -255,18 +253,13 @@ class InterviewUser:
         self.coding_question_asked = False  # Track if coding question has been asked
 
     def __repr__(self):
-        return f"InterviewUser(socket_id={self.socket_id})"
+        return f"InterviewUser(user_id={self.user_id})"
 
 def create_app():
     app = Flask(__name__)
     socketio.init_app(app)
     return app
 users = []
-def get_user_by_socket_id(socket_id):
-    for user in users:
-        if user.socket_id == socket_id:
-            return user
-    return None
 
 @socketio.on('connect')
 def handle_connect():
@@ -343,7 +336,7 @@ def extract_score_from_evaluation(evaluation_text):
 def handle_start_interview(data):
     print(colored("-----------START INTERVIEW-----------", 'cyan'))
     print(data)
-    user = InterviewUser(data['socketId'], data['userId'], data['name'])
+    user = InterviewUser( data['userId'], data['name']) 
     users.append(user)
     try:
         response = requests.post(url=f"http://localhost:8000/apps/CODEEVAL/users/{data['userId']}/sessions/{user.session_id}", json={})
@@ -355,7 +348,7 @@ def handle_start_interview(data):
     except requests.exceptions.RequestException as e:
         print(f"Request exception: {e}")
         app_logger.error(f"Request exception: {e}")
-        socketio.emit('ai_response', {"phase": "error", "response": "A network error occurred. Please try again later.", "recipient": data['socketId']})
+        socketio.emit('ai_response', {"phase": "error", "response": "A network error occurred. Please try again later.", "recipient": data['userId']})
         return
     response = invoke_with_rate_limit(greeting_chain, {
         "input": "Greet the candidate warmly and ask ONE question to get to know them better.",
@@ -370,8 +363,15 @@ def handle_start_interview(data):
     greeting_phase_history.append(f"AI: {response.content}")
     print(f"{colored('Interviewer:', 'cyan')} {response.content}")
     app_logger.info(f"Interviewer: {response.content}")
-    socketio.emit('ai_response', {"phase": "greeting", "response": response.content, "recipient": data['socketId']})
+    socketio.emit('ai_response', {"phase": "greeting", "response": response.content, "recipient": data['userId']})
 
+def emit_ai_response(user, phase, response, is_transition):
+    socketio.emit('ai_response', {
+        "phase": phase,
+        "response": response,
+        "recipient": user.user_id,
+        **({"transition": True} if is_transition else {})
+    })
 
 def small_talk(user, user_input):
     conversation_memory.chat_memory.add_user_message(user_input)
@@ -400,7 +400,7 @@ def small_talk(user, user_input):
     conversation_memory.chat_memory.add_ai_message(response.content)
     # Store AI response in greeting phase history
     greeting_phase_history.append(f"AI: {response.content}")
-    socketio.emit('ai_response', { "phase": user.phase, "response": response.content, "recipient": user.socket_id})
+    socketio.emit('ai_response', { "phase": user.phase, "response": response.content, "recipient": user.user_id})
 
 def ask_behavioural(user, user_input):
     # Add user input to conversation history
@@ -439,11 +439,8 @@ def ask_behavioural(user, user_input):
         conversation_memory.chat_memory.add_ai_message(response.content)
         # Store AI response in behavioral phase history
         behavioral_phase_history.append(f"AI: {response.content}")
-        socketio.emit('ai_response', {
-            "phase": user.phase,
-            "response": response.content,
-            "recipient": user.socket_id
-        })
+        is_last = (user.question_count == len(user.behavioral_questions))
+        emit_ai_response(user, user.phase, response.content, not is_last)
 
 def ask_technical(user, user_input):
     print(evaluation(behavioral_phase_history, "technical"))
@@ -485,11 +482,8 @@ def ask_technical(user, user_input):
         conversation_memory.chat_memory.add_ai_message(response.content)
         # Store AI response in technical phase history
         technical_phase_history.append(f"AI: {response.content}")
-        socketio.emit('ai_response', {
-            "phase": user.phase,
-            "response": response.content,
-            "recipient": user.socket_id
-        })
+        is_last = (user.question_count == len(user.technical_questions))
+        emit_ai_response(user, user.phase, response.content, not is_last)
 
 def ask_coding(user, user_input):
     # Add the user's input to conversation history
@@ -512,8 +506,8 @@ def ask_coding(user, user_input):
         
         print(f"ADK Response: {adk_response}")
         
-        socketio.emit('ai_response', { "phase": user.phase, "response": adk_response, "recipient": user.socket_id})
-    
+        is_last = (user.question_count == get_phase("coding")["question_limit"])
+        emit_ai_response(user, user.phase, adk_response, not is_last)
     else:
         # Store user message in coding phase history
         coding_phase_history.append(f"Candidate: {user_input}")
@@ -530,9 +524,8 @@ def ask_coding(user, user_input):
         print(f"ADK Evaluation: {adk_response}")
         
         # Send the evaluation response to the user
-        socketio.emit('ai_response', { "phase": user.phase, "response": adk_response, "recipient": user.socket_id})
-
-
+        is_last = (user.question_count == get_phase("coding")["question_limit"])
+        emit_ai_response(user, user.phase, adk_response, not is_last)
 
 def phase_transition(user, user_input):
     # Add user input to conversation history
@@ -566,40 +559,38 @@ def phase_transition(user, user_input):
         return
     print(f"{colored('Interviewer:', 'cyan')} {response.content}")
     conversation_memory.chat_memory.add_ai_message(response.content)
-    socketio.emit('ai_response', {"phase": user.phase, "response": response.content, "recipient": user.socket_id, "transition": True})
-
-    # Move to next phase if available
+    emit_ai_response(user, user.phase, response.content, True)
     next_phase = get_next_phase_name(user.phase)
     if next_phase != "end":
         user.phase = next_phase
         user.question_count = 0  # Reset question count for new phase
         print(colored(f"-----------{next_phase.upper()} PHASE-----------", 'cyan'))
-        
-        # Special handling for coding phase transition
         if next_phase == "coding":
-            # For coding phase, we need to ask for the first coding question
-            user.question_count = 1  # Set to 1 since we're starting the phase
+            user.question_count = 1
             ask_coding(user, "Please ask me a coding question")
         else:
-            # For other phases, use the normal ask function with a greeting message
-            user.question_count = 1  # Set to 1 since we're starting the phase  
+            user.question_count = 1
             get_phase(next_phase)["ask_func"](user, f"Let's start the {next_phase} phase")
     else:
         user.phase = "end"
-        # Interview completed
         socketio.emit('ai_response', {
             "phase": "end", 
             "response": "Thank you for participating in this interview. We will be in touch soon with our decision.",
-            "recipient": user.socket_id
+            "recipient": user.user_id
         })
 
 @socketio.on('message')
 def handle_message(data):
-    user = get_user_by_socket_id(data['socketId'])
+    user_id = data.get('userId')
+    user = None
+    for u in users:
+        if u.user_id == user_id:
+            user = u
+            break
     if user is None:
-        print(f"[ERROR] No user found for socketId: {data['socketId']}")
-        app_logger.error(f"No user found for socketId: {data['socketId']}")
-        return  # Or optionally emit an error to the client
+        print(f"[ERROR] No user found for userId: {user_id}")
+        app_logger.error(f"No user found for userId: {user_id}")
+        return
 
     print(f"{data} ::: {user}")
     print(colored(f"{user.name}: ", "yellow") + data['message'])
