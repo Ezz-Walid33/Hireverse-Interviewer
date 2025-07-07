@@ -158,11 +158,17 @@ conversation_memory = ConversationBufferMemory(return_messages=True)
 
 # Define the phases as an array for easy reordering
 PHASES = [
+    #{
+    #    "name": "greeting",
+    #    "chain": lambda: greeting_chain,
+    #    "question_limit": 3,
+    #    "ask_func": lambda user, msg: small_talk(user, msg),
+    #},
     {
-        "name": "greeting",
-        "chain": lambda: greeting_chain,
+        "name": "coding",
+        "chain": lambda: coding_chain,
         "question_limit": 3,
-        "ask_func": lambda user, msg: small_talk(user, msg),
+        "ask_func": lambda user, msg: ask_coding(user, msg),
     },
     {
         "name": "behavioural",
@@ -175,13 +181,8 @@ PHASES = [
         "chain": lambda: technical_chain,
         "question_limit": 3,
         "ask_func": lambda user, msg: ask_technical(user, msg),
-    },
-    {
-        "name": "coding",
-        "chain": lambda: coding_chain,
-        "question_limit": 3,
-        "ask_func": lambda user, msg: ask_coding(user, msg),
-    },
+    }
+    
 ]
 
 # Helper to get phase index and phase object by name
@@ -446,17 +447,29 @@ def phase_transition(user, user_input):
         print(f"Unknown phase: {user.phase}")
         return
 
-    # Generate a comment on the last response in this phase
-    prompt = {
-        "input": f"The candidate just said: \"{user_input}\" in the {user.phase} phase. Comment on it briefly and positively. Do not ask any questions.",
-        "history": history
-    }
+    next_phase_name = get_next_phase_name(user.phase)
+    if next_phase_name != "end":
+        prompt = {
+            "input": f'The candidate just said: "{user_input}" in the {user.phase} phase. Comment on it briefly and positively. Do not ask any questions, and ',
+            "history": history
+        }
+        if user.phase == "coding":
+            prompt["assistant"] = []  # or the correct value for your context
+    else:
+        prompt = {
+            "input": f'The candidate just said: "{user_input}" in the {user.phase} phase. Comment on it briefly and positively. Do not ask any questions, and segue into the end of the interview.',
+            "history": history
+        }
+        # --- FIX: Add this block ---
+        if user.phase == "coding":
+            prompt["assistant"] = []  # or the correct value for your context
+
     response = invoke_with_rate_limit(phase["chain"](), prompt, user)
     if response is None:
         return
     print(f"{colored('Interviewer:', 'cyan')} {response.content}")
     conversation_memory.chat_memory.add_ai_message(response.content)
-    socketio.emit('ai_response', {"phase": user.phase, "response": response.content, "recipient": user.socket_id})
+    socketio.emit('ai_response', {"phase": user.phase, "response": response.content, "recipient": user.socket_id, "transition": True})
 
     # Move to next phase if available
     next_phase = get_next_phase_name(user.phase)
@@ -486,6 +499,11 @@ def phase_transition(user, user_input):
 @socketio.on('message')
 def handle_message(data):
     user = get_user_by_socket_id(data['socketId'])
+    if user is None:
+        print(f"[ERROR] No user found for socketId: {data['socketId']}")
+        app_logger.error(f"No user found for socketId: {data['socketId']}")
+        return  # Or optionally emit an error to the client
+
     print(f"{data} ::: {user}")
     print(colored(f"{user.name}: ", "yellow") + data['message'])
     app_logger.info(f"{user.name}: {data['message']}")
