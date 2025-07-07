@@ -161,12 +161,6 @@ technical_chain = technical_prompt | technical_llm
 coding_chain = coding_prompt | technical_llm
 evaluation_chain = evaluation_prompt | evaluation_llm
 
-# Phase-specific conversation history storage
-greeting_phase_history = []
-behavioral_phase_history = []
-technical_phase_history = []
-coding_phase_history = []
-
 
 
 
@@ -194,7 +188,7 @@ def serialize_messages(messages):
     return serialized
 
 # Global memory to store conversation history
-conversation_memory = ConversationBufferMemory(return_messages=True)
+# conversation_memory = ConversationBufferMemory(return_messages=True)
 
 # Define the phases as an array for easy reordering
 PHASES = [
@@ -251,6 +245,29 @@ class InterviewUser:
         self.phase = PHASES[0]["name"]  # Start with the first phase
         self.question_count = 0
         self.coding_question_asked = False  # Track if coding question has been asked
+        # Per-user phase histories
+        self.history = {
+            "greeting": [],
+            "behavioural": [],
+            "technical": [],
+            "coding": []
+        }
+        self.eval ={
+            "behavioural": {
+                "score": None,
+                "feedback": None
+            },
+            "technical": {
+                "score": None,
+                "feedback": None
+            },
+            "coding": {
+                "score": None,
+                "feedback": None
+            }
+        }
+        # Per-user conversation memory
+        self.conversation_memory = ConversationBufferMemory(return_messages=True)
 
     def __repr__(self):
         return f"InterviewUser(user_id={self.user_id})"
@@ -263,11 +280,11 @@ users = []
 
 @socketio.on('connect')
 def handle_connect():
-    print("Node.js socket connected")
+    print("Node.js socket connected.")
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print('A client disconnected!')
+    print('Node.js socket connection lost.')
 
 def invoke_with_rate_limit(chain, input_data, user=None):
     try:
@@ -335,7 +352,6 @@ def extract_score_from_evaluation(evaluation_text):
 @socketio.on('start_interview')
 def handle_start_interview(data):
     print(colored("-----------START INTERVIEW-----------", 'cyan'))
-    print(data)
     user = InterviewUser( data['userId'], data['name']) 
     users.append(user)
     try:
@@ -356,11 +372,9 @@ def handle_start_interview(data):
     }, user)
     if response is None:
         return
-    conversation_memory.chat_memory.add_ai_message(str(response.content))
-    # Increment question count since we asked the first question
+    user.conversation_memory.chat_memory.add_ai_message(str(response.content))
     user.question_count = 1
-    # Store initial AI greeting in greeting phase history
-    greeting_phase_history.append(f"AI: {response.content}")
+    user.history["greeting"].append(f"AI: {response.content}")
     print(f"{colored('Interviewer:', 'cyan')} {response.content}")
     app_logger.info(f"Interviewer: {response.content}")
     socketio.emit('ai_response', {"phase": "greeting", "response": response.content, "recipient": data['userId']})
@@ -374,196 +388,173 @@ def emit_ai_response(user, phase, response, is_transition):
     })
 
 def small_talk(user, user_input):
-    conversation_memory.chat_memory.add_user_message(user_input)
-    # Store user message in greeting phase history
-    greeting_phase_history.append(f"Candidate: {user_input}")
-    
-    history = conversation_memory.chat_memory.messages
-    
-    # Tailor response based on question count in greeting phase
+    user.conversation_memory.chat_memory.add_user_message(user_input)
+    user.history["greeting"].append(f"Candidate: {user_input}")
+
+    history = user.conversation_memory.chat_memory.messages
+
     if user.question_count == 1:
         prompt_text = "Respond warmly to their answer and ask ONE follow-up question to learn more about their background or interests."
     elif user.question_count == 2:
         prompt_text = "Comment positively on what they shared and ask ONE more question about their experiences or goals."
     else:
         prompt_text = "Acknowledge what they said and make a brief transition comment about moving to the next part of the interview."
-    
+
     response = invoke_with_rate_limit(greeting_chain, {
         "input": prompt_text,
         "history": history
     }, user)
-    
+
     if response is None:
         return
-        
-    print(f"{response.content}")
-    conversation_memory.chat_memory.add_ai_message(response.content)
-    # Store AI response in greeting phase history
-    greeting_phase_history.append(f"AI: {response.content}")
-    socketio.emit('ai_response', { "phase": user.phase, "response": response.content, "recipient": user.user_id})
+    print(f"{colored('Interviewer:', 'cyan')} {response.content}")
+    user.conversation_memory.chat_memory.add_ai_message(response.content)
+    user.history["greeting"].append(f"AI: {response.content}")
+    # Never set transition True here
+    emit_ai_response(user, user.phase, response.content, False)
 
 def ask_behavioural(user, user_input):
-    # Add user input to conversation history
-    conversation_memory.chat_memory.add_user_message(user_input)
-    # Store user message in behavioral phase history
-    behavioral_phase_history.append(f"Candidate: {user_input}")
-    
-    # Initialize behavioral questions if not already done
+    user.conversation_memory.chat_memory.add_user_message(user_input)
+    user.history["behavioural"].append(f"Candidate: {user_input}")
+
     if not hasattr(user, 'behavioral_questions'):
         user.behavioral_questions = random.sample(behavioral_questions, min(3, len(behavioral_questions)))
-    
-    history = conversation_memory.chat_memory.messages
-    
-    # Determine which question to ask based on question count
+
+    history = user.conversation_memory.chat_memory.messages
     question_index = user.question_count - 1
-    
+
     if question_index < len(user.behavioral_questions):
         question = user.behavioral_questions[question_index]
-        
+
         if user.question_count == 1:
-            # First behavioral question - just ask the main question
             prompt_text = f"Comment briefly on the last thing the candidate said and then ask this behavioral question: {question}"
         else:
-            # Subsequent questions - ask ONE follow-up to get more details, then move to next question
             prompt_text = f"Ask ONE follow-up question to get more specific details about their previous answer. If they've provided enough detail, move on to ask: {question}"
-            
+
         response = invoke_with_rate_limit(behavioral_chain, {
             "input": prompt_text,
             "history": history
         }, user)
-        
+
         if response is None:
             return
-            
+
         print(f"{colored('Interviewer:', 'cyan')} {response.content}")
-        conversation_memory.chat_memory.add_ai_message(response.content)
-        # Store AI response in behavioral phase history
-        behavioral_phase_history.append(f"AI: {response.content}")
-        is_last = (user.question_count == len(user.behavioral_questions))
-        emit_ai_response(user, user.phase, response.content, not is_last)
+        user.conversation_memory.chat_memory.add_ai_message(response.content)
+        user.history["behavioural"].append(f"AI: {response.content}")
+        # Never set transition True here
+        emit_ai_response(user, user.phase, response.content, False)
 
 def ask_technical(user, user_input):
-    print(evaluation(behavioral_phase_history, "technical"))
-    print(f"'AAAAAAAAAAAAAAAA======',{greeting_phase_history},'========--=-=-=',{behavioral_phase_history},'========--=-=-=',{technical_phase_history})")
-    # Add user input to conversation history
-    conversation_memory.chat_memory.add_user_message(user_input)
-    # Store user message in technical phase history
-    technical_phase_history.append(f"Candidate: {user_input}")
-    
-    # Initialize technical questions if not already done
+    user.conversation_memory.chat_memory.add_user_message(user_input)
+    user.history["technical"].append(f"Candidate: {user_input}")
+
     if not hasattr(user, 'technical_questions'):
         user.technical_questions = random.sample(tech_questions, min(3, len(tech_questions)))
-    
-    history = conversation_memory.chat_memory.messages
-    
-    # Determine which question to ask based on question count
+
+    history = user.conversation_memory.chat_memory.messages
     question_index = user.question_count - 1
-    
+
     if question_index < len(user.technical_questions):
         question_data = user.technical_questions[question_index]
         question = question_data['Question']
-        
+
         if user.question_count == 1:
-            # First technical question - just ask the main question
             prompt_text = f"Declare that you are now going to ask a few technical questions, then ask this question: {question}"
         else:
-            # Subsequent questions - provide brief feedback and ask next question
             prompt_text = f"Provide brief feedback on their technical answer without giving away correct answers. Then ask: {question}"
-            
+
         response = invoke_with_rate_limit(technical_chain, {
             "input": prompt_text,
             "history": history
         }, user)
-        
+
         if response is None:
             return
-            
+
         print(f"{colored('Interviewer:', 'cyan')} {response.content}")
-        conversation_memory.chat_memory.add_ai_message(response.content)
-        # Store AI response in technical phase history
-        technical_phase_history.append(f"AI: {response.content}")
-        is_last = (user.question_count == len(user.technical_questions))
-        emit_ai_response(user, user.phase, response.content, not is_last)
+        user.conversation_memory.chat_memory.add_ai_message(response.content)
+        user.history["technical"].append(f"AI: {response.content}")
+        # Never set transition True here
+        emit_ai_response(user, user.phase, response.content, False)
 
 def ask_coding(user, user_input):
-    # Add the user's input to conversation history
-    conversation_memory.chat_memory.add_user_message(user_input)
-    
-    # If this is the first time in coding phase, ask for a coding question
+    user.conversation_memory.chat_memory.add_user_message(user_input)
+
     if not user.coding_question_asked:
-        
         adk_response = send_message_to_adk(user, "Please ask the coding question")
         if not adk_response:
             print("No response from ADK")
             return
-        
+
         user.coding_question_asked = True
-        
-        # Send ADK response directly to the user
-        conversation_memory.chat_memory.add_ai_message(adk_response)
-        # Store AI response in coding phase history
-        coding_phase_history.append(f"AI: {adk_response}")
-        
+        user.conversation_memory.chat_memory.add_ai_message(adk_response)
+        user.history["coding"].append(f"AI: {adk_response}")
+
         print(f"ADK Response: {adk_response}")
-        
-        is_last = (user.question_count == get_phase("coding")["question_limit"])
-        emit_ai_response(user, user.phase, adk_response, not is_last)
+
+        # Never set transition True here
+        emit_ai_response(user, user.phase, adk_response, False)
     else:
-        # Store user message in coding phase history
-        coding_phase_history.append(f"Candidate: {user_input}")
-        
-        # Send the user's answer to ADK for evaluation
+        user.history["coding"].append(f"Candidate: {user_input}")
+
         adk_response = send_message_to_adk(user, user_input)
         if not adk_response:
             print("No response from ADK")
             return
-        
-        conversation_memory.chat_memory.add_ai_message(adk_response)
-        coding_phase_history.append(f"AI: {adk_response}")
-        
+
+        user.conversation_memory.chat_memory.add_ai_message(adk_response)
+        user.history["coding"].append(f"AI: {adk_response}")
+
         print(f"ADK Evaluation: {adk_response}")
-        
-        # Send the evaluation response to the user
-        is_last = (user.question_count == get_phase("coding")["question_limit"])
-        emit_ai_response(user, user.phase, adk_response, not is_last)
+
+        # Never set transition True here
+        emit_ai_response(user, user.phase, adk_response, False)
 
 def phase_transition(user, user_input):
-    # Add user input to conversation history
-    conversation_memory.chat_memory.add_user_message(user_input)
-    
-    history = conversation_memory.chat_memory.messages
+    user.conversation_memory.chat_memory.add_user_message(user_input)
+    history = user.conversation_memory.chat_memory.messages
     phase = get_phase(user.phase)
     if not phase:
         print(f"Unknown phase: {user.phase}")
         return
 
     next_phase_name = get_next_phase_name(user.phase)
+    phase_history = user.history.get(user.phase, [])
+    eval = evaluation(phase_history, user.phase)
+    if user.phase != "greeting":
+        user.eval[user.phase] = {
+            "score": extract_score_from_evaluation(eval),
+            "feedback": eval
+        }
+        print(colored(f'{user.phase.capitalize()} Phase Evaluation:', 'green'))
+        print(f"{colored("Score:", 'light_yellow')} {user.eval[user.phase]['score']}")
+        print(f"{colored('Feedback:', 'light_cyan')} {user.eval[user.phase]['feedback']}")
     if next_phase_name != "end":
         prompt = {
             "input": f'The candidate just said: "{user_input}" in the {user.phase} phase. Comment on it briefly and positively. Do not ask any questions, and ',
             "history": history
         }
         if user.phase == "coding":
-            prompt["assistant"] = []  # or the correct value for your context
+            prompt["assistant"] = []
     else:
         prompt = {
             "input": f'The candidate just said: "{user_input}" in the {user.phase} phase. Comment on it briefly and positively. Do not ask any questions, and segue into the end of the interview.',
             "history": history
         }
-        # --- FIX: Add this block ---
         if user.phase == "coding":
-            prompt["assistant"] = []  # or the correct value for your context
+            prompt["assistant"] = []
 
     response = invoke_with_rate_limit(phase["chain"](), prompt, user)
     if response is None:
         return
     print(f"{colored('Interviewer:', 'cyan')} {response.content}")
-    conversation_memory.chat_memory.add_ai_message(response.content)
+    user.conversation_memory.chat_memory.add_ai_message(response.content)
     emit_ai_response(user, user.phase, response.content, True)
     next_phase = get_next_phase_name(user.phase)
     if next_phase != "end":
         user.phase = next_phase
-        user.question_count = 0  # Reset question count for new phase
+        user.question_count = 0
         print(colored(f"-----------{next_phase.upper()} PHASE-----------", 'cyan'))
         if next_phase == "coding":
             user.question_count = 1
@@ -574,10 +565,15 @@ def phase_transition(user, user_input):
     else:
         user.phase = "end"
         socketio.emit('ai_response', {
-            "phase": "end", 
+            "phase": "end",
             "response": "Thank you for participating in this interview. We will be in touch soon with our decision.",
-            "recipient": user.user_id
+            "recipient": user.user_id,
+            "eval": user.eval
         })
+        # Clear the user's session and remove from users list
+        if user in users:
+            users.remove(user)
+        del user
 
 @socketio.on('message')
 def handle_message(data):
@@ -592,7 +588,6 @@ def handle_message(data):
         app_logger.error(f"No user found for userId: {user_id}")
         return
 
-    print(f"{data} ::: {user}")
     print(colored(f"{user.name}: ", "yellow") + data['message'])
     app_logger.info(f"{user.name}: {data['message']}")
     
@@ -607,7 +602,6 @@ def handle_message(data):
         print(f"Unknown phase: {user.phase}")
         return
 
-    print(f"Phase: {user.phase}, Question count: {user.question_count}, Limit: {phase['question_limit']}")
 
     if user.question_count <= phase["question_limit"]:
         phase["ask_func"](user, data['message'])
