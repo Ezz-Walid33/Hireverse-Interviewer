@@ -65,9 +65,10 @@ def load_technical_questions(csv_path):
 
 # Initialize LLMs
 from langchain_groq import ChatGroq
-greeting_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.6)
-behavioral_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.6)
-technical_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.6)
+greeting_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.7)
+behavioral_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.7)
+technical_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.7)
+evaluation_llm = ChatGroq(model_name="mistral-saba-24b", temperature=0.3)
 
 # Create prompt templates
 def get_greeting_prompt(cv_text):
@@ -76,7 +77,8 @@ def get_greeting_prompt(cv_text):
         The candidate's CV contains this information:
         {cv_text}
         Maintain a friendly but professional tone. Ask ONE question at a time and wait 
-        for their response before proceeding. Keep responses concise and conversational."""),
+        for their response before proceeding. Keep responses concise and conversational.
+        DO NOT THANK THE CANDIDATE"""),
         MessagesPlaceholder(variable_name="history"),
         ("human", "{input}")
     ])
@@ -86,7 +88,7 @@ behavioral_prompt = ChatPromptTemplate.from_messages([
     Ask ONE question at a time and wait for their response. Keep conversations natural 
     by focusing on one topic before moving to the next. When you need follow-up details, 
     ask one specific follow-up question rather than multiple questions at once.
-    Avoid excessive thanking or overly positive language. Keep responses professional and focused."""),
+    DONT THANK THE CANDIDATE or use overly positive language. Keep responses professional and focused."""),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}")
 ])
@@ -97,7 +99,7 @@ technical_prompt = ChatPromptTemplate.from_messages([
     for their response before proceeding to the next question.
     When providing feedback on answers, be brief and constructive without giving away 
     correct answers. Focus on one concept at a time for clear understanding.
-    Avoid thanking the candidate repeatedly."""),
+    DO NOT THANK THE CANDIDATE."""),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}")
 ])
@@ -124,6 +126,30 @@ Assistant's input:"""),
     ("human", "{input}")
 ])
 
+evaluation_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are an expert interview evaluator. Analyze the conversation from a specific interview phase and provide a comprehensive evaluation.
+
+Your evaluation should include:
+1. Overall performance assessment (Excellent/Good/Average/Poor)
+2. Key strengths demonstrated by the candidate
+3. Areas for improvement
+4. Specific examples from the conversation to support your assessment
+5. Recommendations for the candidate's development
+
+Be objective, constructive, and specific in your feedback. Focus on communication skills, technical knowledge (if applicable), problem-solving approach, and overall interview performance in this phase.
+
+IMPORTANT: You MUST end your response with EXACTLY this format on the last line:
+SCORE: [number from 1-100]
+
+Example:
+SCORE: 75"""),
+    ("human", """Please evaluate the following interview conversation from the {phase_name} phase:
+
+{conversation_history}
+
+Remember to end with the exact format: SCORE: [number from 1-100]""")
+])
+
 # Extract CV text and load questions    
 cv_path = os.path.join("Interview Files", "candidate_cv.pdf")  # Adjusted to the Interview Files directory
 csv_path = os.path.join("Interview Files", "Software Questions.csv")  # Adjusted to the Interview Files directory
@@ -133,6 +159,20 @@ greeting_chain = get_greeting_prompt(cv_text) | greeting_llm
 behavioral_chain = behavioral_prompt | behavioral_llm
 technical_chain = technical_prompt | technical_llm
 coding_chain = coding_prompt | technical_llm
+evaluation_chain = evaluation_prompt | evaluation_llm
+
+# Phase-specific conversation history storage
+greeting_phase_history = []
+behavioral_phase_history = []
+technical_phase_history = []
+coding_phase_history = []
+
+
+
+
+
+
+
 
 # Load technical and behavioral questions
 tech_questions = load_technical_questions(csv_path)
@@ -266,6 +306,39 @@ def invoke_with_rate_limit(chain, input_data, user=None):
             print(f"Error emitted to user_id {user.user_id}")
         return None
 
+def evaluation(phase_history, phase_name):
+    if not phase_history:
+        return f"No conversation data available for {phase_name} phase evaluation."
+    
+    conversation_text = "\n".join(phase_history)
+    
+    try:
+        response = evaluation_chain.invoke({
+            "phase_name": phase_name,
+            "conversation_history": conversation_text
+        })
+        return response.content
+    except Exception as e:
+        error_msg = f"Error evaluating {phase_name} phase: {e}"
+        print(error_msg)
+        return error_msg
+
+def extract_score_from_evaluation(evaluation_text):
+    try:
+        import re
+        pattern = r'SCORE:\s*(\d+)'
+        match = re.search(pattern, evaluation_text)
+        if match:
+            score = int(match.group(1))
+
+            if 1 <= score <= 100:
+                return score
+        return None
+    except Exception as e:
+        print(f"Error extracting score: {e}")
+        return None
+
+
 @socketio.on('start_interview')
 def handle_start_interview(data):
     print(colored("-----------START INTERVIEW-----------", 'cyan'))
@@ -285,13 +358,16 @@ def handle_start_interview(data):
         socketio.emit('ai_response', {"phase": "error", "response": "A network error occurred. Please try again later.", "recipient": data['socketId']})
         return
     response = invoke_with_rate_limit(greeting_chain, {
-        "input": "Greet the candidate warmly.",
+        "input": "Greet the candidate warmly and ask ONE question to get to know them better.",
         "history": []
     }, user)
     if response is None:
         return
-    conversation_memory.chat_memory.add_user_message("Greet the candidate warmly")
     conversation_memory.chat_memory.add_ai_message(str(response.content))
+    # Increment question count since we asked the first question
+    user.question_count = 1
+    # Store initial AI greeting in greeting phase history
+    greeting_phase_history.append(f"AI: {response.content}")
     print(f"{colored('Interviewer:', 'cyan')} {response.content}")
     app_logger.info(f"Interviewer: {response.content}")
     socketio.emit('ai_response', {"phase": "greeting", "response": response.content, "recipient": data['socketId']})
@@ -299,14 +375,16 @@ def handle_start_interview(data):
 
 def small_talk(user, user_input):
     conversation_memory.chat_memory.add_user_message(user_input)
-        
+    # Store user message in greeting phase history
+    greeting_phase_history.append(f"Candidate: {user_input}")
+    
     history = conversation_memory.chat_memory.messages
     
     # Tailor response based on question count in greeting phase
     if user.question_count == 1:
-        prompt_text = "Respond warmly to their introduction and ask ONE question about themselves or their background."
+        prompt_text = "Respond warmly to their answer and ask ONE follow-up question to learn more about their background or interests."
     elif user.question_count == 2:
-        prompt_text = "Comment briefly on what they shared and ask ONE follow-up question about their experiences or interests."
+        prompt_text = "Comment positively on what they shared and ask ONE more question about their experiences or goals."
     else:
         prompt_text = "Acknowledge what they said and make a brief transition comment about moving to the next part of the interview."
     
@@ -319,12 +397,16 @@ def small_talk(user, user_input):
         return
         
     print(f"{response.content}")
-    conversation_memory.chat_memory.add_ai_message(response.content) 
+    conversation_memory.chat_memory.add_ai_message(response.content)
+    # Store AI response in greeting phase history
+    greeting_phase_history.append(f"AI: {response.content}")
     socketio.emit('ai_response', { "phase": user.phase, "response": response.content, "recipient": user.socket_id})
 
 def ask_behavioural(user, user_input):
     # Add user input to conversation history
     conversation_memory.chat_memory.add_user_message(user_input)
+    # Store user message in behavioral phase history
+    behavioral_phase_history.append(f"Candidate: {user_input}")
     
     # Initialize behavioral questions if not already done
     if not hasattr(user, 'behavioral_questions'):
@@ -340,7 +422,7 @@ def ask_behavioural(user, user_input):
         
         if user.question_count == 1:
             # First behavioral question - just ask the main question
-            prompt_text = f"Ask this behavioral question: {question}"
+            prompt_text = f"Comment briefly on the last thing the candidate said and then ask this behavioral question: {question}"
         else:
             # Subsequent questions - ask ONE follow-up to get more details, then move to next question
             prompt_text = f"Ask ONE follow-up question to get more specific details about their previous answer. If they've provided enough detail, move on to ask: {question}"
@@ -355,6 +437,8 @@ def ask_behavioural(user, user_input):
             
         print(f"{colored('Interviewer:', 'cyan')} {response.content}")
         conversation_memory.chat_memory.add_ai_message(response.content)
+        # Store AI response in behavioral phase history
+        behavioral_phase_history.append(f"AI: {response.content}")
         socketio.emit('ai_response', {
             "phase": user.phase,
             "response": response.content,
@@ -362,8 +446,12 @@ def ask_behavioural(user, user_input):
         })
 
 def ask_technical(user, user_input):
+    print(evaluation(behavioral_phase_history, "technical"))
+    print(f"'AAAAAAAAAAAAAAAA======',{greeting_phase_history},'========--=-=-=',{behavioral_phase_history},'========--=-=-=',{technical_phase_history})")
     # Add user input to conversation history
     conversation_memory.chat_memory.add_user_message(user_input)
+    # Store user message in technical phase history
+    technical_phase_history.append(f"Candidate: {user_input}")
     
     # Initialize technical questions if not already done
     if not hasattr(user, 'technical_questions'):
@@ -380,7 +468,7 @@ def ask_technical(user, user_input):
         
         if user.question_count == 1:
             # First technical question - just ask the main question
-            prompt_text = f"Ask this technical question: {question}"
+            prompt_text = f"Declare that you are now going to ask a few technical questions, then ask this question: {question}"
         else:
             # Subsequent questions - provide brief feedback and ask next question
             prompt_text = f"Provide brief feedback on their technical answer without giving away correct answers. Then ask: {question}"
@@ -395,6 +483,8 @@ def ask_technical(user, user_input):
             
         print(f"{colored('Interviewer:', 'cyan')} {response.content}")
         conversation_memory.chat_memory.add_ai_message(response.content)
+        # Store AI response in technical phase history
+        technical_phase_history.append(f"AI: {response.content}")
         socketio.emit('ai_response', {
             "phase": user.phase,
             "response": response.content,
@@ -417,25 +507,32 @@ def ask_coding(user, user_input):
         
         # Send ADK response directly to the user
         conversation_memory.chat_memory.add_ai_message(adk_response)
+        # Store AI response in coding phase history
+        coding_phase_history.append(f"AI: {adk_response}")
         
         print(f"ADK Response: {adk_response}")
         
         socketio.emit('ai_response', { "phase": user.phase, "response": adk_response, "recipient": user.socket_id})
     
     else:
+        # Store user message in coding phase history
+        coding_phase_history.append(f"Candidate: {user_input}")
+        
         # Send the user's answer to ADK for evaluation
         adk_response = send_message_to_adk(user, user_input)
         if not adk_response:
             print("No response from ADK")
             return
         
-        # Send ADK evaluation directly to the user
         conversation_memory.chat_memory.add_ai_message(adk_response)
+        coding_phase_history.append(f"AI: {adk_response}")
         
         print(f"ADK Evaluation: {adk_response}")
         
         # Send the evaluation response to the user
         socketio.emit('ai_response', { "phase": user.phase, "response": adk_response, "recipient": user.socket_id})
+
+
 
 def phase_transition(user, user_input):
     # Add user input to conversation history
@@ -551,6 +648,8 @@ def extract_features_endpoint():
         return jsonify({"status": "success", "features": str(features)})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
 
 if __name__ == "__main__":
     socketio.run(app)
