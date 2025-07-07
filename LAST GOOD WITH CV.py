@@ -609,6 +609,27 @@ def handle_message(data):
         # Transition to next phase
         phase_transition(user, data['message'])
 
+@socketio.on('end_interview')
+def handle_end_interview(data):
+    user_id = data.get('userId')
+    user = None
+    for u in users:
+        if u.user_id == user_id:
+            user = u
+            break
+    if user is None:
+        print(f"[ERROR] No user found for userId: {user_id}")
+        app_logger.error(f"No user found for userId: {user_id}")
+        return
+
+    print(colored(f"Ending interview for {user.name}", 'cyan'))
+    app_logger.info(f"Ending interview for {user.name}")
+
+    # Clear the user's session and remove from users list
+    if user in users:
+        users.remove(user)
+    del user
+
 @app.route('/extract_features', methods=['POST'])
 def extract_features_endpoint():
     """
