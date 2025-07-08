@@ -4,6 +4,7 @@ import tempfile
 import subprocess
 import shutil
 import wave
+import json
 
 # Set the base directory to Hireverse-Interviewer
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -42,6 +43,15 @@ def is_valid_wav(filepath):
 # Ensure output directory exists
 output_dir = os.path.join(BASE_DIR, "data", "processed")
 os.makedirs(output_dir, exist_ok=True)
+
+# Add this helper at the top or near your function
+def to_serializable(obj):
+    """Convert custom objects to dicts if possible, else return as-is."""
+    if hasattr(obj, "dict"):  # Pydantic or similar
+        return obj.dict()
+    if hasattr(obj, "__dict__"):
+        return vars(obj)
+    return obj
 
 def extract_features_from_video(participant_id, video_path, output_csv_path=None):
     print(f"[INFO] Starting feature extraction for participant: {participant_id}")
@@ -220,8 +230,53 @@ def extract_features_from_video(participant_id, video_path, output_csv_path=None
             if os.path.exists(p):
                 os.remove(p)
 
-        return {
-            "facial_features": facial_features,
-            "prosodic_features": prosodic_features,
-            "lexical_features": lexical_features
-        }
+        # --- ORDERED FEATURE LIST ---
+        feature_order = [
+            # Prosodic features
+            "f0_mean","f0_min","f0_max","f0_range","f0_sd","intensity_mean","intensity_min","intensity_max","intensity_range","intensity_sd",
+            "f1_mean","f1_sd","f2_mean","f2_sd","f3_mean","f3_sd","f2_f1_mean","f3_f1_mean","f2_f1_sd","f3_f1_sd","jitter","shimmer",
+            "percent_unvoiced","percent_breaks","pause_duration_max","pause_duration_avg","duration",
+            # Facial features
+            "average_outer_brow_height_mean","average_inner_brow_height_mean","eye_open_mean","outer_lip_height_mean","inner_lip_height_mean",
+            "lip_corner_distance_mean","smile_mean","pitch_mean","yaw_mean","roll_mean",
+            "average_outer_brow_height_std","average_inner_brow_height_std","eye_open_std","outer_lip_height_std","inner_lip_height_std",
+            "lip_corner_distance_std","smile_std","pitch_std","yaw_std","roll_std",
+            "average_outer_brow_height_min","average_inner_brow_height_min","eye_open_min","outer_lip_height_min","inner_lip_height_min",
+            "lip_corner_distance_min","smile_min","pitch_min","yaw_min","roll_min",
+            "average_outer_brow_height_max","average_inner_brow_height_max","eye_open_max","outer_lip_height_max","inner_lip_height_max",
+            "lip_corner_distance_max","smile_max","pitch_max","yaw_max","roll_max",
+            "average_outer_brow_height_median","average_inner_brow_height_median","eye_open_median","outer_lip_height_median","inner_lip_height_median",
+            "lip_corner_distance_median","smile_median","pitch_median","yaw_median","roll_median",
+            # Lexical features
+            "Total Words","Unique Words","Filler Words","Audio Duration (s)","Duration/Total Words","Duration/Unique Words","Duration/Filler Words",
+            "Individual","We","They","Non-Fluences","PosEmotion","NegEmotion","Anxiety","Anger","Sadness","Cognitive","Inhibition","Preceptual",
+            "Relativity","Work","Swear","Articles","Verbs","Adverbs","Prepositions","Conjunctions","Negations","Quantifiers","Numbers"
+        ]
+
+        # Convert all features to dicts if needed
+        prosodic_features_dict = to_serializable(prosodic_features) if prosodic_features is not None else {}
+        facial_features_dict = to_serializable(facial_features) if facial_features is not None else {}
+        lexical_features_dict = to_serializable(lexical_features) if lexical_features is not None else {}
+
+        # Merge all features into one dict for easy lookup
+        all_features = {}
+        all_features.update(prosodic_features_dict)
+        all_features.update(facial_features_dict)
+        all_features.update(lexical_features_dict)
+
+        # Build the ordered array
+        ordered_feature_array = []
+        for key in feature_order:
+            value = all_features.get(key)
+            if isinstance(value, (list, tuple)):
+                ordered_feature_array.extend(value)
+            else:
+                ordered_feature_array.append(value if value is not None else 0)
+
+        def to_native_type(x):
+            if isinstance(x, (np.generic,)):
+                return x.item()
+            return x
+
+        # Return as a list of lists, with native types
+        return [[to_native_type(x) for x in ordered_feature_array]]

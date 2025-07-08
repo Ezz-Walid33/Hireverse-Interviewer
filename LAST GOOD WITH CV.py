@@ -651,11 +651,10 @@ def extract_features_endpoint():
 
     try:
         features = extract_features_from_video(participant_id, video_path)
-        return jsonify({"status": "success", "features": str(features)})
+        return jsonify({"status": "success", "instances": features})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-
 if __name__ == "__main__":
-    socketio.run(app)
+    socketio.run(app, allow_unsafe_werkzeug=True)
