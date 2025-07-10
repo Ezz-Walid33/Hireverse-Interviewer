@@ -78,7 +78,7 @@ def get_greeting_prompt(cv_text):
         {cv_text}
         Maintain a friendly but professional tone. Ask ONE question at a time and wait 
         for their response before proceeding. Keep responses concise and conversational.
-        DO NOT THANK THE CANDIDATE"""),
+        DO NOT THANK THE CANDIDATE. Follow the instructions exactly - if told not to ask questions, provide only comments."""),
         MessagesPlaceholder(variable_name="history"),
         ("human", "{input}")
     ])
@@ -88,7 +88,8 @@ behavioral_prompt = ChatPromptTemplate.from_messages([
     Ask ONE question at a time and wait for their response. Keep conversations natural 
     by focusing on one topic before moving to the next. When you need follow-up details, 
     ask one specific follow-up question rather than multiple questions at once.
-    DONT THANK THE CANDIDATE or use overly positive language. Keep responses professional and focused."""),
+    DONT THANK THE CANDIDATE or use overly positive language. Keep responses professional and focused.
+    Follow the instructions exactly - if told not to ask questions, provide only comments."""),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}")
 ])
@@ -99,7 +100,7 @@ technical_prompt = ChatPromptTemplate.from_messages([
     for their response before proceeding to the next question.
     When providing feedback on answers, be brief and constructive without giving away 
     correct answers. Focus on one concept at a time for clear understanding.
-    DO NOT THANK THE CANDIDATE."""),
+    DO NOT THANK THE CANDIDATE. Follow the instructions exactly - if told not to ask questions, provide only comments."""),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}")
 ])
@@ -375,7 +376,7 @@ def handle_start_interview(data):
     user.conversation_memory.chat_memory.add_ai_message(str(response.content))
     user.question_count = 1
     user.history["greeting"].append(f"AI: {response.content}")
-    print(f"{colored('Interviewer:', 'cyan')} {response.content}")
+    print(colored('Interviewer:', 'cyan') + f" {response.content}")
     app_logger.info(f"Interviewer: {response.content}")
     socketio.emit('ai_response', {"phase": "greeting", "response": response.content, "recipient": data['userId']})
 
@@ -407,7 +408,7 @@ def small_talk(user, user_input):
 
     if response is None:
         return
-    print(f"{colored('Interviewer:', 'cyan')} {response.content}")
+    print(colored('Interviewer:', 'cyan') + f" {response.content}")
     user.conversation_memory.chat_memory.add_ai_message(response.content)
     user.history["greeting"].append(f"AI: {response.content}")
     # Never set transition True here
@@ -427,7 +428,7 @@ def ask_behavioural(user, user_input):
         question = user.behavioral_questions[question_index]
 
         if user.question_count == 1:
-            prompt_text = f"Comment briefly on the last thing the candidate said and then ask this behavioral question: {question}"
+            prompt_text = f"Ask this behavioral question: {question}"
         else:
             prompt_text = f"Ask ONE follow-up question to get more specific details about their previous answer. If they've provided enough detail, move on to ask: {question}"
 
@@ -439,7 +440,7 @@ def ask_behavioural(user, user_input):
         if response is None:
             return
 
-        print(f"{colored('Interviewer:', 'cyan')} {response.content}")
+        print(colored('Interviewer:', 'cyan') + f" {response.content}")
         user.conversation_memory.chat_memory.add_ai_message(response.content)
         user.history["behavioural"].append(f"AI: {response.content}")
         # Never set transition True here
@@ -472,7 +473,7 @@ def ask_technical(user, user_input):
         if response is None:
             return
 
-        print(f"{colored('Interviewer:', 'cyan')} {response.content}")
+        print(colored('Interviewer:', 'cyan') + f" {response.content}")
         user.conversation_memory.chat_memory.add_ai_message(response.content)
         user.history["technical"].append(f"AI: {response.content}")
         # Never set transition True here
@@ -528,11 +529,11 @@ def phase_transition(user, user_input):
             "feedback": eval
         }
         print(colored(f'{user.phase.capitalize()} Phase Evaluation:', 'green'))
-        print(f"{colored("Score:", 'light_yellow')} {user.eval[user.phase]['score']}")
-        print(f"{colored('Feedback:', 'light_cyan')} {user.eval[user.phase]['feedback']}")
+        print(colored("Score:", 'light_yellow') + f" {user.eval[user.phase]['score']}")
+        print(colored('Feedback:', 'light_cyan') + f" {user.eval[user.phase]['feedback']}")
     if next_phase_name != "end":
         prompt = {
-            "input": f'The candidate just said: "{user_input}" in the {user.phase} phase. Comment on it briefly and positively. Do not ask any questions, and ',
+            "input": f'The candidate just said: "{user_input}" in the {user.phase} phase. Comment on it briefly and positively. Do not ask any questions. Just provide a brief acknowledgment and transition comment to wrap up this phase.',
             "history": history
         }
         if user.phase == "coding":
@@ -548,7 +549,7 @@ def phase_transition(user, user_input):
     response = invoke_with_rate_limit(phase["chain"](), prompt, user)
     if response is None:
         return
-    print(f"{colored('Interviewer:', 'cyan')} {response.content}")
+    print(colored('Interviewer:', 'cyan') + f" {response.content}")
     user.conversation_memory.chat_memory.add_ai_message(response.content)
     emit_ai_response(user, user.phase, response.content, True)
     next_phase = get_next_phase_name(user.phase)
