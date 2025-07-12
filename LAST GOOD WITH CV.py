@@ -51,6 +51,18 @@ app_logger = logging.getLogger('app_logger')
 app_logger.setLevel(logging.INFO)
 app_logger.addHandler(file_handler)
 
+coding_lines = [
+    "Have a go at this coding problem.",
+    "Let's see how you approach this coding challenge.",
+    "Try solving this programming task.",
+    "Here's a coding problem for you to tackle.",
+    "Give this coding exercise a shot.",
+    "Let's work through this coding question together."
+]
+
+def get_random_coding_line():
+    return random.choice(coding_lines)
+
 # Function to extract text from PDF CV
 def generate_id(length=16):
     characters = string.ascii_letters + string.digits  # A-Z, a-z, 0-9
@@ -366,14 +378,15 @@ from threading import Thread
 default_animation_thread = Thread(target=default_animation_loop, args=(py_face,))
 default_animation_thread.start()
 
-def emit_ai_response_with_audio(user, phase, response, is_transition, eval_data=None):
+def emit_ai_response_with_audio(user, phase, response, is_transition, eval_data=None, text_response=None):
     """
     Generates audio for the AI response, sends it to the neurosync local API,
     emits the ai_response event via socketio (only once, after facial animation starts).
     If eval_data is provided, it will be included in the emit (for end of interview).
+    If text_response is provided, it will be used for the text display instead of the audio response.
     """
     try:
-        # 1. Generate audio file from text
+        # 1. Generate audio file from text (using response for audio)
         audio_filename = f"{generate_id(12)}.wav"
         audio_path = os.path.join(wav_dir, audio_filename)
         print(f"[INFO] Generated audio file: {audio_path}")
@@ -389,11 +402,12 @@ def emit_ai_response_with_audio(user, phase, response, is_transition, eval_data=
         api_response = requests.post(api_url, data=audio_bytes)
         if api_response.status_code == 200:
             blendshapes = api_response.json().get("blendshapes")
-            print(f"[INFO] Received blendshapes from neurosync API: {blendshapes[:2]}...")  # Print a preview
             # Send to Unreal via LiveLink (start animation)
+            # Use text_response for display if provided, otherwise use response
+            display_text = text_response if text_response is not None else response
             emit_data = {
                 "phase": phase,
-                "response": response,
+                "response": display_text,
                 "recipient": user.user_id,
                 "audio": audio_b64,
                 **({"transition": True} if is_transition else {})
@@ -886,241 +900,20 @@ def ask_coding(user, user_input):
         # Never set transition True here
         emit_ai_response_with_audio(user, user.phase, adk_response, False)
 
-def phase_transition(user, user_input):
-    user.conversation_memory.chat_memory.add_user_message(user_input)
-    history = user.conversation_memory.chat_memory.messages
-    phase = get_phase(user.phase)
-    if not phase:
-        print(f"Unknown phase: {user.phase}")
+@socketio.on('end_user_session')
+def handle_end_user_session(data):
+    """Handle session cleanup when Node.js server ends a user session"""
+    user_id = data.get('userId')
+    if not user_id:
         return
-
-    next_phase_name = get_next_phase_name(user.phase)
-    phase_history = user.history.get(user.phase, [])
-    eval = evaluation(phase_history, user.phase)
-    if user.phase != "greeting":
-        user.eval[user.phase] = {
-            "score": extract_score_from_evaluation(eval),
-            "feedback": eval
-        }
-        print(colored(f'{user.phase.capitalize()} Phase Evaluation:', 'green'))
-        print(colored("Score:", 'light_yellow') + f" {user.eval[user.phase]['score']}")
-        print(colored('Feedback:', 'light_cyan') + f" {user.eval[user.phase]['feedback']}")
-    if next_phase_name != "end":
-        prompt = {
-            "input": f'The candidate just said: "{user_input}" in the {user.phase} phase. Comment on it briefly and positively. Do not ask any questions. Just provide a brief acknowledgment and transition comment to wrap up this phase.',
-            "history": history
-        }
-        if user.phase == "coding":
-            prompt["assistant"] = []
-    else:
-        prompt = {
-            "input": f'The candidate just said: "{user_input}" in the {user.phase} phase. Comment on it briefly and positively. Do not ask any questions, and segue into the end of the interview.',
-            "history": history
-        }
-        if user.phase == "coding":
-            prompt["assistant"] = []
-
-    response = invoke_with_rate_limit(phase["chain"](), prompt, user)
-    if response is None:
-        return
-    print(colored('Interviewer:', 'cyan') + f" {response.content}")
-    user.conversation_memory.chat_memory.add_ai_message(response.content)
-    if next_phase_name != "end":
-        emit_ai_response_with_audio(user, user.phase, response.content, True)
-        next_phase = get_next_phase_name(user.phase)
-        if next_phase != "end":
-            user.phase = next_phase
-            user.question_count = 0
-            print(colored(f"-----------{next_phase.upper()} PHASE-----------", 'cyan'))
-            if next_phase == "coding":
-                user.question_count = 1
-                ask_coding(user, "Please ask me a coding question")
-            else:
-                user.question_count = 1
-                get_phase(next_phase)["ask_func"](user, f"Let's start the {next_phase} phase")
-        else:
-            user.phase = "end"
-            # End interview emit with audio and eval
-            emit_ai_response_with_audio(
-                user,
-                "end",
-                "Thank you for participating in this interview. We will be in touch soon with our decision.",
-                False,
-                eval_data=user.eval
-            )
-            # Clear the user's session and remove from users list
-            if user in users:
-                users.remove(user)
-            del user
-    else:
-        # End interview emit with audio and eval
-        emit_ai_response_with_audio(
-            user,
-            "end",
-            "Thank you for participating in this interview. We will be in touch soon with our decision.",
-            False,
-            eval_data=user.eval
-        )
-        # Clear the user's session and remove from users list
-        if user in users:
-            users.remove(user)
+    
+    # Find and remove the user from the users list
+    global users
+    users_to_remove = [user for user in users if user.user_id == user_id]
+    for user in users_to_remove:
+        users.remove(user)
+        print(colored(f"Session cleanup: Removed user {user_id} from Flask server", 'yellow'))
         del user
-
-@socketio.on('start_interview')
-def handle_start_interview(data):
-    print(colored("-----------START INTERVIEW-----------", 'cyan'))
-    user = InterviewUser( data['userId'], data['name']) 
-    users.append(user)
-    try:
-        response = requests.post(url=f"http://localhost:8000/apps/CODEEVAL/users/{data['userId']}/sessions/{user.session_id}", json={})
-        if response.status_code == 200:
-            user.adk_connected = True
-            print(f"ADK connected for user {data['userId']} with session ID {user.session_id}")
-        else:
-            print(f"User {data['userId']} failed to connect to ADK. Status code {response.status_code}")
-    except requests.exceptions.RequestException as e:
-        print(f"Request exception: {e}")
-        app_logger.error(f"Request exception: {e}")
-        socketio.emit('ai_response', {"phase": "error", "response": "A network error occurred. Please try again later.", "recipient": data['userId']})
-        return
-    response = invoke_with_rate_limit(greeting_chain, {
-        "input": "Greet the candidate warmly and ask ONE question to get to know them better.",
-        "history": []
-    }, user)
-    if response is None:
-        return
-    user.conversation_memory.chat_memory.add_ai_message(str(response.content))
-    user.question_count = 1
-    user.history["greeting"].append(f"AI: {response.content}")
-    print(colored('Interviewer:', 'cyan') + f" {response.content}")
-    app_logger.info(f"Interviewer: {response.content}")
-    emit_ai_response_with_audio(user, "greeting", response.content, False)
-
-
-
-def small_talk(user, user_input):
-    user.conversation_memory.chat_memory.add_user_message(user_input)
-    user.history["greeting"].append(f"Candidate: {user_input}")
-
-    history = user.conversation_memory.chat_memory.messages
-
-    if user.question_count == 1:
-        prompt_text = "Respond warmly to their answer and ask ONE follow-up question to learn more about their background or interests."
-    elif user.question_count == 2:
-        prompt_text = "Comment positively on what they shared and ask ONE more question about their experiences or goals."
-    else:
-        prompt_text = "Acknowledge what they said and make a brief transition comment about moving to the next part of the interview."
-
-    response = invoke_with_rate_limit(greeting_chain, {
-        "input": prompt_text,
-        "history": history
-    }, user)
-
-    if response is None:
-        return
-    print(colored('Interviewer:', 'cyan') + f" {response.content}")
-    user.conversation_memory.chat_memory.add_ai_message(response.content)
-    user.history["greeting"].append(f"AI: {response.content}")
-    # Never set transition True here
-    emit_ai_response_with_audio(user, user.phase, response.content, False)
-
-def ask_behavioural(user, user_input):
-    user.conversation_memory.chat_memory.add_user_message(user_input)
-    user.history["behavioural"].append(f"Candidate: {user_input}")
-
-    if not hasattr(user, 'behavioral_questions'):
-        user.behavioral_questions = random.sample(behavioral_questions, min(3, len(behavioral_questions)))
-
-    history = user.conversation_memory.chat_memory.messages
-    question_index = user.question_count - 1
-
-    if question_index < len(user.behavioral_questions):
-        question = user.behavioral_questions[question_index]
-
-        if user.question_count == 1:
-            prompt_text = f"Ask this behavioral question: {question}"
-        else:
-            prompt_text = f"Ask ONE follow-up question to get more specific details about their previous answer. If they've provided enough detail, move on to ask: {question}"
-
-        response = invoke_with_rate_limit(behavioral_chain, {
-            "input": prompt_text,
-            "history": history
-        }, user)
-
-        if response is None:
-            return
-
-        print(colored('Interviewer:', 'cyan') + f" {response.content}")
-        user.conversation_memory.chat_memory.add_ai_message(response.content)
-        user.history["behavioural"].append(f"AI: {response.content}")
-        # Never set transition True here
-        emit_ai_response_with_audio(user, user.phase, response.content, False)
-
-def ask_technical(user, user_input):
-    user.conversation_memory.chat_memory.add_user_message(user_input)
-    user.history["technical"].append(f"Candidate: {user_input}")
-
-    if not hasattr(user, 'technical_questions'):
-        user.technical_questions = random.sample(tech_questions, min(3, len(tech_questions)))
-
-    history = user.conversation_memory.chat_memory.messages
-    question_index = user.question_count - 1
-
-    if question_index < len(user.technical_questions):
-        question_data = user.technical_questions[question_index]
-        question = question_data['Question']
-
-        if user.question_count == 1:
-            prompt_text = f"Declare that you are now going to ask a few technical questions, then ask this question: {question}"
-        else:
-            prompt_text = f"Provide brief feedback on their technical answer without giving away correct answers. Then ask: {question}"
-
-        response = invoke_with_rate_limit(technical_chain, {
-            "input": prompt_text,
-            "history": history
-        }, user)
-
-        if response is None:
-            return
-
-        print(colored('Interviewer:', 'cyan') + f" {response.content}")
-        user.conversation_memory.chat_memory.add_ai_message(response.content)
-        user.history["technical"].append(f"AI: {response.content}")
-        # Never set transition True here
-        emit_ai_response_with_audio(user, user.phase, response.content, False)
-
-def ask_coding(user, user_input):
-    user.conversation_memory.chat_memory.add_user_message(user_input)
-
-    if not user.coding_question_asked:
-        adk_response = send_message_to_adk(user, "Please ask the coding question")
-        if not adk_response:
-            print("No response from ADK")
-            return
-
-        user.coding_question_asked = True
-        user.conversation_memory.chat_memory.add_ai_message(adk_response)
-        user.history["coding"].append(f"AI: {adk_response}")
-
-        print(f"ADK Response: {adk_response}")
-
-        # Never set transition True here
-        emit_ai_response_with_audio(user, user.phase, adk_response, False)
-    else:
-        user.history["coding"].append(f"Candidate: {user_input}")
-
-        adk_response = send_message_to_adk(user, user_input)
-        if not adk_response:
-            print("No response from ADK")
-            return
-
-        user.conversation_memory.chat_memory.add_ai_message(adk_response)
-        user.history["coding"].append(f"AI: {adk_response}")
-
-        print(f"ADK Evaluation: {adk_response}")
-
-        # Never set transition True here
-        emit_ai_response_with_audio(user, user.phase, adk_response, False)
 
 def phase_transition(user, user_input):
     user.conversation_memory.chat_memory.add_user_message(user_input)
@@ -1358,6 +1151,21 @@ def ask_coding(user, user_input):
         # Never set transition True here
         emit_ai_response_with_audio(user, user.phase, adk_response, False)
 
+@socketio.on('end_user_session')
+def handle_end_user_session(data):
+    """Handle session cleanup when Node.js server ends a user session"""
+    user_id = data.get('userId')
+    if not user_id:
+        return
+    
+    # Find and remove the user from the users list
+    global users
+    users_to_remove = [user for user in users if user.user_id == user_id]
+    for user in users_to_remove:
+        users.remove(user)
+        print(colored(f"Session cleanup: Removed user {user_id} from Flask server", 'yellow'))
+        del user
+
 def phase_transition(user, user_input):
     user.conversation_memory.chat_memory.add_user_message(user_input)
     history = user.conversation_memory.chat_memory.messages
@@ -1436,6 +1244,177 @@ def phase_transition(user, user_input):
         # Clear the user's session and remove from users list
         if user in users:
             users.remove(user)
+        del user
+
+@socketio.on('start_interview')
+def handle_start_interview(data):
+    print(colored("-----------START INTERVIEW-----------", 'cyan'))
+    user = InterviewUser( data['userId'], data['name']) 
+    users.append(user)
+    try:
+        response = requests.post(url=f"http://localhost:8000/apps/CODEEVAL/users/{data['userId']}/sessions/{user.session_id}", json={})
+        if response.status_code == 200:
+            user.adk_connected = True
+            print(f"ADK connected for user {data['userId']} with session ID {user.session_id}")
+        else:
+            print(f"User {data['userId']} failed to connect to ADK. Status code {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"Request exception: {e}")
+        app_logger.error(f"Request exception: {e}")
+        socketio.emit('ai_response', {"phase": "error", "response": "A network error occurred. Please try again later.", "recipient": data['userId']})
+        return
+    response = invoke_with_rate_limit(greeting_chain, {
+        "input": "Greet the candidate warmly and ask ONE question to get to know them better.",
+        "history": []
+    }, user)
+    if response is None:
+        return
+    user.conversation_memory.chat_memory.add_ai_message(str(response.content))
+    user.question_count = 1
+    user.history["greeting"].append(f"AI: {response.content}")
+    print(colored('Interviewer:', 'cyan') + f" {response.content}")
+    app_logger.info(f"Interviewer: {response.content}")
+    emit_ai_response_with_audio(user, "greeting", response.content, False)
+
+
+
+def small_talk(user, user_input):
+    user.conversation_memory.chat_memory.add_user_message(user_input)
+    user.history["greeting"].append(f"Candidate: {user_input}")
+
+    history = user.conversation_memory.chat_memory.messages
+
+    if user.question_count == 1:
+        prompt_text = "Respond warmly to their answer and ask ONE follow-up question to learn more about their background or interests."
+    elif user.question_count == 2:
+        prompt_text = "Comment positively on what they shared and ask ONE more question about their experiences or goals."
+    else:
+        prompt_text = "Acknowledge what they said and make a brief transition comment about moving to the next part of the interview."
+
+    response = invoke_with_rate_limit(greeting_chain, {
+        "input": prompt_text,
+        "history": history
+    }, user)
+
+    if response is None:
+        return
+    print(colored('Interviewer:', 'cyan') + f" {response.content}")
+    user.conversation_memory.chat_memory.add_ai_message(response.content)
+    user.history["greeting"].append(f"AI: {response.content}")
+    # Never set transition True here
+    emit_ai_response_with_audio(user, user.phase, response.content, False)
+
+def ask_behavioural(user, user_input):
+    user.conversation_memory.chat_memory.add_user_message(user_input)
+    user.history["behavioural"].append(f"Candidate: {user_input}")
+
+    if not hasattr(user, 'behavioral_questions'):
+        user.behavioral_questions = random.sample(behavioral_questions, min(3, len(behavioral_questions)))
+
+    history = user.conversation_memory.chat_memory.messages
+    question_index = user.question_count - 1
+
+    if question_index < len(user.behavioral_questions):
+        question = user.behavioral_questions[question_index]
+
+        if user.question_count == 1:
+            prompt_text = f"Ask this behavioral question: {question}"
+        else:
+            prompt_text = f"Ask ONE follow-up question to get more specific details about their previous answer. If they've provided enough detail, move on to ask: {question}"
+
+        response = invoke_with_rate_limit(behavioral_chain, {
+            "input": prompt_text,
+            "history": history
+        }, user)
+
+        if response is None:
+            return
+
+        print(colored('Interviewer:', 'cyan') + f" {response.content}")
+        user.conversation_memory.chat_memory.add_ai_message(response.content)
+        user.history["behavioural"].append(f"AI: {response.content}")
+        # Never set transition True here
+        emit_ai_response_with_audio(user, user.phase, response.content, False)
+
+def ask_technical(user, user_input):
+    user.conversation_memory.chat_memory.add_user_message(user_input)
+    user.history["technical"].append(f"Candidate: {user_input}")
+
+    if not hasattr(user, 'technical_questions'):
+        user.technical_questions = random.sample(tech_questions, min(3, len(tech_questions)))
+
+    history = user.conversation_memory.chat_memory.messages
+    question_index = user.question_count - 1
+
+    if question_index < len(user.technical_questions):
+        question_data = user.technical_questions[question_index]
+        question = question_data['Question']
+
+        if user.question_count == 1:
+            prompt_text = f"Declare that you are now going to ask a few technical questions, then ask this question: {question}"
+        else:
+            prompt_text = f"Provide brief feedback on their technical answer without giving away correct answers. Then ask: {question}"
+
+        response = invoke_with_rate_limit(technical_chain, {
+            "input": prompt_text,
+            "history": history
+        }, user)
+
+        if response is None:
+            return
+
+        print(colored('Interviewer:', 'cyan') + f" {response.content}")
+        user.conversation_memory.chat_memory.add_ai_message(response.content)
+        user.history["technical"].append(f"AI: {response.content}")
+        # Never set transition True here
+        emit_ai_response_with_audio(user, user.phase, response.content, False)
+
+def ask_coding(user, user_input):
+    user.conversation_memory.chat_memory.add_user_message(user_input)
+
+    if not user.coding_question_asked:
+        adk_response = send_message_to_adk(user, "Please ask the coding question")
+        if not adk_response:
+            print("No response from ADK")
+            return
+
+        user.coding_question_asked = True
+        user.conversation_memory.chat_memory.add_ai_message(adk_response)
+        user.history["coding"].append(f"AI: {adk_response}")
+
+        print(f"ADK Response: {adk_response}")
+
+        # Never set transition True here
+        emit_ai_response_with_audio(user, user.phase, adk_response, False)
+    else:
+        user.history["coding"].append(f"Candidate: {user_input}")
+
+        adk_response = send_message_to_adk(user, user_input)
+        if not adk_response:
+            print("No response from ADK")
+            return
+
+        user.conversation_memory.chat_memory.add_ai_message(adk_response)
+        user.history["coding"].append(f"AI: {adk_response}")
+
+        print(f"ADK Evaluation: {adk_response}")
+
+        # Never set transition True here
+        emit_ai_response_with_audio(user, user.phase, adk_response, False)
+
+@socketio.on('end_user_session')
+def handle_end_user_session(data):
+    """Handle session cleanup when Node.js server ends a user session"""
+    user_id = data.get('userId')
+    if not user_id:
+        return
+    
+    # Find and remove the user from the users list
+    global users
+    users_to_remove = [user for user in users if user.user_id == user_id]
+    for user in users_to_remove:
+        users.remove(user)
+        print(colored(f"Session cleanup: Removed user {user_id} from Flask server", 'yellow'))
         del user
 
 @socketio.on('message')
