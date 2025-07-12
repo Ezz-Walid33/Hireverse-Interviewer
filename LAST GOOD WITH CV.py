@@ -32,6 +32,7 @@ import re
 from utils.generated_runners import run_audio_animation
 from livelink.connect.livelink_init import create_socket_connection, initialize_py_face
 from livelink.animations.default_animation import default_animation_loop
+from inference_from_text import EmotionClassifier
 
 
 load_dotenv()
@@ -45,6 +46,8 @@ file_handler = logging.FileHandler('flask_logs.log')
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(formatter)
 log.addHandler(file_handler)
+
+skip_blendshapes = True
 
 # Set up a custom logger for candidate and interviewer messages
 app_logger = logging.getLogger('app_logger')
@@ -398,33 +401,34 @@ def emit_ai_response_with_audio(user, phase, response, is_transition, eval_data=
             audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
 
         # 3. Send audio bytes to the neurosync local API
-        api_url = "http://127.0.0.1:7000/audio_to_blendshapes"
-        api_response = requests.post(api_url, data=audio_bytes)
-        if api_response.status_code == 200:
-            blendshapes = api_response.json().get("blendshapes")
+        if(not skip_blendshapes):
+            api_url = "http://127.0.0.1:7000/audio_to_blendshapes"
+            api_response = requests.post(api_url, data=audio_bytes)
+            if api_response.status_code == 200:
+                blendshapes = api_response.json().get("blendshapes")
             # Send to Unreal via LiveLink (start animation)
             # Use text_response for display if provided, otherwise use response
-            display_text = text_response if text_response is not None else response
-            emit_data = {
-                "phase": phase,
-                "response": display_text,
-                "recipient": user.user_id,
-                "audio": audio_b64,
-                **({"transition": True} if is_transition else {})
-            }
-            if eval_data is not None:
-                emit_data["eval"] = eval_data
-            socketio.emit('ai_response', emit_data)
-            run_audio_animation(audio_bytes, blendshapes, py_face, socket_connection, default_animation_thread)
+                run_audio_animation(audio_bytes, blendshapes, py_face, socket_connection, default_animation_thread)
             # Emit the AI response as before, with optional eval data (only once, after animation starts)
-
-        else:
-            print(f"[ERROR] Neurosync API error: {api_response.status_code} {api_response.text}")
-            blendshapes = None
+        
+        # else:
+        #     print(f"[ERROR] Neurosync API error: {api_response.status_code} {api_response.text}")
+        #     blendshapes = None
+        display_text = text_response if text_response is not None else response
+        emit_data = {
+            "phase": phase,
+            "response": display_text,
+            "recipient": user.user_id,
+            "audio": audio_b64,
+            **({"transition": True} if is_transition else {})
+            }
+        if eval_data is not None:
+            emit_data["eval"] = eval_data
+        socketio.emit('ai_response', emit_data)
 
     except Exception as e:
         print(f"Audio/blendshape generation failed: {e}")
-        blendshapes = None
+        #blendshapes = None
 
 
 
@@ -1496,6 +1500,52 @@ def extract_features_endpoint():
         return jsonify({"status": "success", "instances": features})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/extract_emotion', methods=['POST'])
+def extract_emotion_endpoint():
+    """
+    Emotion extraction endpoint for interview analysis
+    Expects JSON: { "messages": ["message1", "message2", ...] }
+    Returns emotion analysis for the provided messages
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+        
+        messages = data.get("messages", [])
+        
+        if not messages:
+            return jsonify({"error": "No messages provided"}), 400
+        
+        if not isinstance(messages, list):
+            return jsonify({"error": "Messages must be an array"}), 400
+        
+        # Filter out empty messages
+        valid_messages = [msg for msg in messages if msg and isinstance(msg, str) and msg.strip()]
+        
+        if not valid_messages:
+            return jsonify({"error": "No valid messages found"}), 400
+        
+        # Initialize emotion classifier
+        classifier = EmotionClassifier()
+        
+        # Get emotion breakdown for database storage
+        emotion_breakdown = classifier.get_emotion_breakdown_for_database(valid_messages)
+        
+        if "error" in emotion_breakdown:
+            return jsonify({"error": emotion_breakdown["error"]}), 500
+        
+        return jsonify({
+            "status": "success",
+            "emotion_analysis": emotion_breakdown
+        })
+        
+    except Exception as e:
+        app_logger.error(f"Error in emotion extraction: {str(e)}")
+        return jsonify({"error": f"Emotion extraction failed: {str(e)}"}), 500
 
 
 if __name__ == "__main__":
